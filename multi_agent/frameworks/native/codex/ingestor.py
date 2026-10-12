@@ -40,15 +40,21 @@ import logging
 from pathlib import Path
 from typing import Any
 
+from ...core.sde_policy import is_sde_native_tool, native_bypass_tool_name
 from ...core.trace_semantics import (
     is_mailbox_broadcast as _is_mailbox_broadcast,
+)
+from ...core.trace_semantics import (
     is_mailbox_send as _is_mailbox_send,
+)
+from ...core.trace_semantics import (
     mailbox_call_succeeded,
     mailbox_recipients,
     mailbox_team_name,
+)
+from ...core.trace_semantics import (
     normalize_mcp_tool_name as _strip_mcp_prefix,
 )
-from ...core.sde_policy import is_sde_native_tool, native_bypass_tool_name
 
 log = logging.getLogger(__name__)
 
@@ -57,12 +63,15 @@ MCP_SERVER_NAME = "multi_agent_tools"
 
 # ---- Artifact discovery ----
 
+
 def _find_codex_sessions(
     agent_dir: Path,
     agent_role: str,
     *,
     created_after: float = 0.0,
     sessions_dir: Path | None = None,
+    match_cwd: bool = True,
+    warn_on_miss: bool = True,
 ) -> list[Path]:
     """Find Codex rollout JSONL files for an agent.
 
@@ -71,26 +80,44 @@ def _find_codex_sessions(
     ``~/.codex/sessions``.  We find sessions by scanning rollout files
     created after spawn_timestamp.
 
-    Since multiple agents share the same sessions dir within a task run, we
-    match rollout files to agents by the cwd field in session_meta.  Each
-    agent produces exactly one rollout file per spawn.
+    Legacy runs can place multiple agents in one sessions directory, so those
+    rollouts are matched by the cwd field in ``session_meta``.  Current runs
+    give every role a fresh, isolated ``CODEX_HOME``; callers can disable cwd
+    matching for those directories because the directory itself identifies
+    the agent.  This also accommodates Codex versions that record a resolved
+    or host workspace cwd instead of the subprocess cwd.
     """
     sessions_dir = sessions_dir or Path.home() / ".codex" / "sessions"
 
     if not sessions_dir.exists():
-        log.warning("No Codex sessions dir at %s", sessions_dir)
+        if warn_on_miss:
+            log.warning("No Codex sessions dir at %s", sessions_dir)
         return []
 
-    candidates = [
-        f for f in sessions_dir.rglob("rollout-*.jsonl")
-        if created_after == 0.0 or f.stat().st_mtime > created_after
-    ]
+    candidates = sorted(
+        (
+            f
+            for f in sessions_dir.rglob("rollout-*.jsonl")
+            if created_after == 0.0 or f.stat().st_mtime > created_after
+        ),
+        key=lambda path: (path.stat().st_mtime_ns, str(path)),
+        reverse=True,
+    )
     if not candidates:
-        log.warning("No Codex rollout files (after ts=%.0f) in %s", created_after, sessions_dir)
+        if warn_on_miss:
+            log.warning(
+                "No Codex rollout files (after ts=%.0f) in %s", created_after, sessions_dir
+            )
         return []
 
-    # All agents share ~/.codex/sessions/. Match rollout to agent by
-    # checking the cwd field in the session_meta (first line).
+    if not match_cwd:
+        # The per-role CODEX_HOME is created empty for this run.  Returning
+        # only the newest rollout preserves the one-session-per-spawn contract
+        # if a Codex version happens to leave an auxiliary rollout behind.
+        return candidates[:1]
+
+    # Shared/legacy sessions need cwd matching to avoid attributing another
+    # agent's rollout to this role.
     agent_cwd = str(agent_dir)
     for f in candidates:
         try:
@@ -104,11 +131,13 @@ def _find_codex_sessions(
         except (json.JSONDecodeError, OSError):
             continue
 
-    log.warning("No Codex rollout matched cwd=%s for agent %s", agent_cwd, agent_role)
+    if warn_on_miss:
+        log.warning("No Codex rollout matched cwd=%s for agent %s", agent_cwd, agent_role)
     return []
 
 
 # ---- Rollout JSONL parsing ----
+
 
 def _parse_codex_rollout(
     rollout_path: Path,
@@ -126,6 +155,7 @@ def _parse_codex_rollout(
     Returns the last assistant text (for hub final output extraction).
     """
     last_assistant_text = ""
+    terminal_error = ""
     # call_id → {name, args, raw_name}
     pending_tool_calls: dict[str, dict[str, Any]] = {}
     pending_mailbox_calls: dict[str, dict[str, Any]] = {}
@@ -145,6 +175,103 @@ def _parse_codex_rollout(
                 continue
 
             record_type = record.get("type", "")
+
+            if record_type == "event_msg":
+                payload = record.get("payload", {})
+                if payload.get("type") == "task_complete" and payload.get("error"):
+                    raw_error = payload["error"]
+                    if isinstance(raw_error, dict):
+                        raw_error = raw_error.get("message") or json.dumps(raw_error)
+                    terminal_error = str(raw_error)
+                    try:
+                        decoded = json.loads(terminal_error)
+                        nested = decoded.get("error", {})
+                        terminal_error = str(nested.get("message") or terminal_error)
+                    except (json.JSONDecodeError, AttributeError):
+                        pass
+
+                # Codex 0.156+ records MCP calls executed through its unified
+                # exec tool as structured completed items.  These replace the
+                # older response_item function_call/function_call_output pair.
+                item = payload.get("item", {})
+                if payload.get("type") == "item_completed" and item.get("type") == "McpToolCall":
+                    server = str(item.get("server", ""))
+                    tool_name = str(item.get("tool", ""))
+                    raw_name = f"mcp__{server}__{tool_name}"
+                    tool_args = item.get("arguments", {})
+                    if not isinstance(tool_args, dict):
+                        tool_args = {"_raw": tool_args}
+                    result = item.get("result", {})
+                    if isinstance(result, dict):
+                        content = result.get("content", [])
+                        parts = [
+                            str(part.get("text", ""))
+                            for part in content
+                            if isinstance(part, dict) and part.get("text")
+                        ]
+                        result_text = "\n".join(parts) or json.dumps(result, default=str)
+                    else:
+                        result_text = str(result)
+
+                    normalized_name = _strip_mcp_prefix(raw_name, mcp_server_name)
+                    if normalized_name in catalog_tool_names:
+                        action_sink.emit_tool_call(
+                            agent_id=agent_role,
+                            agent_role=agent_role,
+                            tool_name=normalized_name,
+                            tool_args=tool_args,
+                            tool_result=result_text,
+                            raw_event={
+                                "framework": "clawteam",
+                                "harness": "codex",
+                                "raw_tool_name": raw_name,
+                                "capture_mode": "codex_rollout_mcp_item_completed",
+                                "source_file": str(rollout_path),
+                                "source_line": line_no,
+                            },
+                            timestamp=_record_timestamp(record),
+                        )
+                    elif _is_mailbox_send(raw_name) or _is_mailbox_broadcast(raw_name):
+                        is_broadcast = _is_mailbox_broadcast(raw_name)
+                        is_error = (
+                            bool(result.get("isError")) if isinstance(result, dict) else False
+                        )
+                        if not mailbox_call_succeeded(
+                            result_text,
+                            is_error=is_error,
+                            status=str(item.get("status", "")),
+                        ):
+                            continue
+                        team_name = mailbox_team_name(tool_args)
+                        if expected_team_name and team_name != expected_team_name:
+                            continue
+                        kind = "broadcast" if is_broadcast else "send"
+                        for recipient in mailbox_recipients(
+                            kind=kind,
+                            sender_role=agent_role,
+                            all_agent_roles=all_agent_roles,
+                            tool_args=tool_args,
+                        ):
+                            raw_event = {
+                                "framework": "clawteam",
+                                "harness": "codex",
+                                "tool": raw_name,
+                                "capture_mode": f"codex_rollout_mcp_{kind}",
+                                "team_name": team_name,
+                                "source_file": str(rollout_path),
+                                "source_line": line_no,
+                            }
+                            if is_broadcast:
+                                raw_event["expanded_from"] = "broadcast"
+                            action_sink.emit_communication(
+                                agent_id=agent_role,
+                                agent_role=agent_role,
+                                target_agent=recipient,
+                                target_role=recipient,
+                                content=str(tool_args.get("content", "")),
+                                raw_event=raw_event,
+                                timestamp=_record_timestamp(record),
+                            )
 
             # ---- response_item: contains model messages and tool calls ----
             if record_type == "response_item":
@@ -237,7 +364,8 @@ def _parse_codex_rollout(
                         content_items = output.get("content_items", [])
                         if content_items:
                             parts = [
-                                ci.get("text", "") for ci in content_items
+                                ci.get("text", "")
+                                for ci in content_items
                                 if isinstance(ci, dict) and "text" in ci
                             ]
                             result_text = "\n".join(parts)
@@ -323,10 +451,14 @@ def _parse_codex_rollout(
             timestamp=tc.get("timestamp"),
         )
 
+    if terminal_error and not last_assistant_text:
+        raise RuntimeError(f"Codex agent {agent_role} failed: {terminal_error}")
+
     return last_assistant_text
 
 
 # ---- Top-level collection entry point ----
+
 
 def collect_codex_traces(
     worktree_map: dict[str, Path],
@@ -362,6 +494,7 @@ def collect_codex_traces(
             agent_role,
             created_after=created_after_for_role,
             sessions_dir=agent_sessions_dir,
+            match_cwd=sessions_dirs_by_role is None,
         )
         if not rollout_files:
             log.warning("No Codex rollout found for agent %s at %s", agent_role, wt_path)

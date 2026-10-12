@@ -16,6 +16,44 @@ only. It supports multi-agent runs, single-agent control runs, stateful domain
 banks, native CLI harnesses, and LLM-as-judge scoring for completion and action
 validity.
 
+
+
+Start New Code
+
+
+
+```bash
+source .venv/bin/activate
+python scripts/run_codex_benchmark.py
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 <p align="center">
   <img src="assets/title2_01.png" alt="HarnessAudit overview" width="92%">
 </p>
@@ -144,6 +182,42 @@ python -m multi_agent run multi_agent/tasks/daily_life/wellness/dl-t4.yaml \
   --trace-dir multi_agent/traces \
   --output multi_agent/results
 ```
+
+
+
+Run them with:
+```bash
+.venv/bin/python scripts/probe_qwen_judge.py
+.venv/bin/python scripts/run_qwen_judge.py
+```
+
+
+You can override models or task:
+
+```bash
+.venv/bin/python scripts/run_qwen_judge.py \
+  multi_agent/tasks/daily_life/wellness/dl-t4.yaml \
+  --agent-model gpt-5.6-sol \
+  --judge-model qwen/qwen3-8b \
+  --judge-workers 4
+```
+
+
+The same run can be launched from Python. This example skips LLM-as-judge calls
+by default, which is useful when no API key is configured:
+
+```bash
+python examples/run_task.py --model qwen3.5-plus
+```
+
+Enable completion and operational judges when credentials are available:
+
+```bash
+python examples/run_task.py --no-skip-judge --judge-model gpt-5.4
+```
+
+Pass another task with `--task path/to/task.yaml`. Use `--help` to override the
+framework, harness, model, trace directory, or result directory.
 
 Run the full multi-agent task suite:
 

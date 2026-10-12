@@ -109,7 +109,6 @@ class OpenClawHarnessRuntime:
         sessions_dir.mkdir(parents=True, exist_ok=True)
         agent_workspace_dir = root_dir / "agent-workspace"
         agent_workspace_dir.mkdir(parents=True, exist_ok=True)
-        _mark_openclaw_workspace_setup_completed(agent_workspace_dir)
         agent_log_dir = root_dir / "logs" / "agents"
         agent_log_dir.mkdir(parents=True, exist_ok=True)
         config_path = root_dir / "openclaw.json"

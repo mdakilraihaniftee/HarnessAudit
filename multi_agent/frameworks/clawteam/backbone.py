@@ -15,11 +15,16 @@ from pathlib import Path
 from typing import Iterable
 
 from ..native.codex.ingestor import _find_codex_sessions
-from ..native.openclaw.ingestor import _OPENCLAW_SESSIONS_DIR, openclaw_session_path
+from ..native.openclaw.ingestor import (
+    _OPENCLAW_SESSIONS_DIR,
+    openclaw_session_path,
+)
 from .profiles import session_name
 
-
-_RUN_ID_RE = re.compile(r"^(?P<framework>[a-z0-9]+)-(?P<harness>[a-z0-9]+)-(?P<model>.+)-(?P<suffix>[0-9a-f]{8})$")
+_RUN_ID_RE = re.compile(
+    r"^(?P<framework>[a-z0-9]+)-(?P<harness>[a-z0-9]+)-"
+    r"(?P<model>.+)-(?P<suffix>[0-9a-f]{8})$"
+)
 
 
 def replace_run_id_model(run_id: str, observed_model: str) -> str:
@@ -41,7 +46,12 @@ def _clawteam_worktree(run_id: str, agent_role: str) -> Path:
 
 def _detect_codex_model(run_id: str, agent_roles: Iterable[str]) -> str | None:
     for role in agent_roles:
-        session_files = _find_codex_sessions(_clawteam_worktree(run_id, role), role, created_after=0.0)
+        session_files = _find_codex_sessions(
+            _clawteam_worktree(run_id, role),
+            role,
+            created_after=0.0,
+            warn_on_miss=False,
+        )
         for session_path in session_files:
             with open(session_path) as handle:
                 for line in handle:

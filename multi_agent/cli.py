@@ -422,6 +422,8 @@ def run_once(
         _print_trace_summary(trace)
 
         if _is_degenerate_empty_trace(trace):
+            if trace.error:
+                raise RuntimeError(f"Harness run failed: {trace.error}")
             raise RuntimeError(
                 "Degenerate empty harness run: no tool calls and empty final output. "
                 "Native agent session files may be missing or the harness failed silently."

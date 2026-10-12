@@ -70,6 +70,18 @@ def _request_error_message(exc: BaseException) -> str:
     return f"OpenAI request failed{status_part}: {exc}"
 
 
+def _is_unsupported_parameter_error(exc: BaseException, parameter: str) -> bool:
+    """Return whether the API explicitly rejected a request parameter."""
+
+    if _status_code(exc) != 400:
+        return False
+    error_param = getattr(exc, "param", None)
+    if error_param == parameter:
+        return True
+    message = str(exc).lower()
+    return parameter.lower() in message and "unsupported parameter" in message
+
+
 def _retry_delay(base_delay: float, attempt: int) -> float:
     return base_delay * (2 ** max(0, attempt - 1))
 
@@ -174,15 +186,28 @@ def create_json_response(
     try:
         for attempt in range(1, attempts + 1):
             try:
-                response = client.responses.create(
-                    model=model,
-                    instructions=system_prompt,
-                    input=user_prompt,
-                    temperature=0,
-                    max_output_tokens=max_output_tokens,
-                )
+                request: dict[str, Any] = {
+                    "model": model,
+                    "instructions": system_prompt,
+                    "input": user_prompt,
+                    "max_output_tokens": max_output_tokens,
+                    "temperature": 0,
+                }
+                response = client.responses.create(**request)
                 break
             except Exception as exc:  # noqa: BLE001
+                if _is_unsupported_parameter_error(exc, "temperature"):
+                    try:
+                        response = client.responses.create(
+                            model=model,
+                            instructions=system_prompt,
+                            input=user_prompt,
+                            max_output_tokens=max_output_tokens,
+                        )
+                    except Exception as fallback_exc:  # noqa: BLE001
+                        exc = fallback_exc
+                    else:
+                        break
                 if attempt < attempts and _is_transient_openai_error(exc):
                     delay = _retry_delay(base_delay, attempt)
                     log.warning(
@@ -222,15 +247,28 @@ async def create_json_response_async(
     base_delay = _retry_base_delay()
     for attempt in range(1, attempts + 1):
         try:
-            response = await client.responses.create(
-                model=model,
-                instructions=system_prompt,
-                input=user_prompt,
-                temperature=0,
-                max_output_tokens=max_output_tokens,
-            )
+            request: dict[str, Any] = {
+                "model": model,
+                "instructions": system_prompt,
+                "input": user_prompt,
+                "max_output_tokens": max_output_tokens,
+                "temperature": 0,
+            }
+            response = await client.responses.create(**request)
             break
         except Exception as exc:  # noqa: BLE001
+            if _is_unsupported_parameter_error(exc, "temperature"):
+                try:
+                    response = await client.responses.create(
+                        model=model,
+                        instructions=system_prompt,
+                        input=user_prompt,
+                        max_output_tokens=max_output_tokens,
+                    )
+                except Exception as fallback_exc:  # noqa: BLE001
+                    exc = fallback_exc
+                else:
+                    break
             if attempt < attempts and _is_transient_openai_error(exc):
                 delay = _retry_delay(base_delay, attempt)
                 log.warning(

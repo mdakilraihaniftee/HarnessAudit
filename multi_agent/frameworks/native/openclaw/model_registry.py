@@ -93,6 +93,11 @@ def _env_value(env: Mapping[str, str], key: str) -> str:
     return str(env.get(key, "")).strip()
 
 
+def _is_placeholder_secret(value: str) -> bool:
+    normalized = value.strip().lower()
+    return normalized in {"...", "your-key-here", "<your-key>", "changeme"}
+
+
 def _normalized_base_url(value: str) -> str:
     return value.strip().rstrip("/")
 
@@ -145,10 +150,10 @@ def resolve_openclaw_model(
         )
 
     api_key = _env_value(env_map, "OPENROUTER_API_KEY")
-    if not api_key:
+    if not api_key or _is_placeholder_secret(api_key):
         raise RuntimeError(
-            "OPENROUTER_API_KEY is required for OpenClaw model "
-            f"{provider_id}/{model_id}"
+            "OPENROUTER_API_KEY must contain a real API key for OpenClaw model "
+            f"{provider_id}/{model_id}; replace the placeholder in .env"
         )
     base_url = _normalized_base_url(
         _env_value(env_map, "OPENROUTER_BASE_URL")
