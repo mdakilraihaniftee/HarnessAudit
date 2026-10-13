@@ -1,0 +1,22 @@
+backend: mock
+arm: B6
+memory_enabled: true
+harness_self_improvement: true
+model: auto
+reflection_interval: 3
+retrieval_limit: 5
+exploration_rate: 0.25
+max_rounds: 10
+request_max_chars: 4000
+allowed_scenarios:
+  - fin-t1
+observation_level: schema_and_trajectory
+max_target_runs: 30
+max_wall_time_seconds: 3600
+target_framework: clawteam
+target_harness: codex
+target_model: gpt-5.6-sol
+target_agent_timeout: 300
+judge_model: gpt-5.4
+skip_judge: true
+max_turns: 30

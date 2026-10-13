@@ -68,6 +68,8 @@ multi_agent/workspaces/
 multi_agent/traces/
 multi_agent/results/
 multi_agent/logs/
+multi_agent/attacks/data/
+multi_agent/attacks/outputs/
 /traces/
 single_agent/traces/
 single_agent/results/
@@ -127,3 +129,4 @@ tests/tmp/
 single_agent/SCALING_PLAN.md
 
 hf_data/
+si_atg_experiments/
