@@ -3,11 +3,23 @@ name = "HarnessAudit"
 version = "0.2.0"
 description = "HarnessAudit: Auditing agent harness safety across multi-agent and single-agent settings"
 requires-python = ">=3.11"
+# Exact pins = the versions verified on the PI cluster. Everything needed at
+# runtime lives in the base list because rc/setup.sh runs plain `uv sync --locked`
+# (no extras) on RIT SPORC (x86_64) and TIGRIS (aarch64).
 dependencies = [
-    "pydantic>=2.0",
-    "pyyaml>=6.0",
-    "python-dotenv>=1.0",
-    "mcp>=1.0.0,<2.0.0",
+    "pydantic==2.13.5",
+    "pyyaml==6.0.3",
+    "python-dotenv==1.2.3",
+    "mcp==1.30.0",
+    # formerly the `oai` extra (judges, OAI adapter, openai_json)
+    "openai-agents==0.22.3",
+    "openai==3.17.0",
+    # formerly the `dev` extra
+    "pytest==9.1.1",
+    "pytest-asyncio==1.4.0",
+    "ruff==0.16.8",
+    # vendored ClawTeam (editable path source, see [tool.uv.sources])
+    "clawteam",
 ]
 
 [project.scripts]
@@ -15,18 +27,12 @@ multi-agent = "multi_agent.cli:main"
 single-agent = "single_agent.cli:main"
 
 [project.optional-dependencies]
-dev = [
-    "pytest>=8.0",
-    "pytest-asyncio>=0.24",
-    "ruff>=0.4",
-]
-# ClawTeam is temporarily vendored under vendor/clawteam while upstream changes
-# are pending merge. Install it with: python -m pip install -e vendor/clawteam
+# Kept as empty aliases for backwards compatibility (`pip install -e .[dev,oai]`):
+# their packages are now base dependencies. ClawTeam is vendored under
+# vendor/clawteam and installed automatically through [tool.uv.sources].
+dev = []
 clawteam = []
-oai = [
-    "openai-agents>=0.13",
-    "openai>=2.24.0",
-]
+oai = []
 
 [build-system]
 requires = ["hatchling"]
@@ -34,6 +40,16 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["multi_agent", "single_agent"]
+
+[tool.uv]
+environments = ["sys_platform == 'linux'"]
+required-environments = [
+  "sys_platform == 'linux' and platform_machine == 'x86_64'",
+  "sys_platform == 'linux' and platform_machine == 'aarch64'",
+]
+
+[tool.uv.sources]
+clawteam = { path = "vendor/clawteam", editable = true }
 
 [tool.ruff]
 line-length = 99

@@ -243,15 +243,19 @@ SKIP_JUDGE=1
 SKIP_EXISTING=1
 TASK_FILE=<one yaml>
 TASK_LIST=<newline-delimited yaml list>
-PYTHON_CMD="conda run -n harnessaudit python"
+PYTHON_CMD=python
 EXTRA_ARGS="..."
 ```
 
 When `HARNESS=openclaw`, the script first records the enabled plugin snapshot:
 
 ```bash
-openclaw plugins list --enabled --json > /tmp/openclaw_plugins_enabled.json
+openclaw plugins list --enabled --json > "${TMPDIR:-/tmp}/harnessaudit_${SLURM_JOB_ID:-local}/openclaw_plugins_enabled.json"
 ```
+
+The snapshot is also copied to `$OUTPUT_DIR/_run_logs/<harness>/<model>/`. Per-run
+workspaces go to the same per-job scratch directory (`MASP_WORKSPACES_ROOT`), so
+several jobs can share a node.
 
 Artifacts are written under harness/model-scoped directories, for example:
 
@@ -297,7 +301,7 @@ FRAMEWORK=openclaw_local
 MODEL=<OpenClaw model name>
 ```
 
-`run_sa.sh` writes `/tmp/openclaw_plugins_enabled.json` before launching tasks.
+`run_sa.sh` writes the same per-job plugin snapshot before launching tasks.
 
 ---
 
