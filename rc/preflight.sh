@@ -11,6 +11,10 @@ ok()   { echo "  ok    $*"; }
 bad()  { echo "  FAIL  $*"; fail=1; }
 warn() { echo "  warn  $*"; }
 
+echo "[0] this machine can push"
+if git push --dry-run -q origin HEAD >/dev/null 2>&1; then ok "git push works"
+else bad "git push fails -> one-time SSH key setup (README, 'One-time setup')"; fi
+
 echo "[1] dependencies are locked"
 if [[ -f pyproject.toml && -f uv.lock ]]; then ok "pyproject.toml + uv.lock present"
 else bad "pyproject.toml / uv.lock missing (see rc/AGENT_TASK.md)"; fi
@@ -54,6 +58,12 @@ hits=$(git grep -nE "cuda:[1-9]|CUDA_VISIBLE_DEVICES\"?\]? *=|pip install|os\.sy
 [[ -z "$hits" ]] && ok "no hard-coded GPU index / runtime pip installs" \
   || { warn "check these lines:"; echo "$hits" | sed 's/^/          /'; }
 
+ign=$(git ls-files --others --ignored --exclude-standard -- '*.py' '*.sh' '*.yaml' '*.yml' '*.toml' '*.cfg' 2>/dev/null \
+       | grep -vE '(^|/)(\.venv[^/]*|node_modules|__pycache__|results|traces|logs|data|cache|checkpoints|wandb|outputs?)/' \
+       | head -20)
+[[ -z "$ign" ]] && ok "no gitignored code/config files" \
+  || { warn "these code/config files exist here but are gitignored, so they will NOT reach RIT:"; echo "$ign" | sed 's/^/          /'; }
+
 echo "[4] rc contract"
 if [[ -f rc/project.env ]]; then
   # shellcheck source=/dev/null
@@ -62,7 +72,7 @@ if [[ -f rc/project.env ]]; then
     [[ -n "${FULL_CMD:-}"  ]] && echo "  ok    FULL_CMD  = $FULL_CMD"  || { echo "  FAIL  FULL_CMD empty"; exit 1; }
   ) || fail=1
 else bad "rc/project.env missing"; fi
-for f in rc/setup.sh rc/update.sh rc/submit.sh rc/status.sh rc/preflight.sh rc/job.slurm; do
+for f in rc/setup.sh rc/update.sh rc/submit.sh rc/status.sh rc/wait.sh rc/preflight.sh rc/job.slurm; do
   mode=$(git ls-files -s "$f" 2>/dev/null | cut -d' ' -f1)
   [[ "$mode" == 100755 ]] || bad "$f not committed as executable -> chmod +x $f && git add $f"
 done
@@ -82,4 +92,4 @@ if [[ "$(git rev-parse HEAD)" == "$(git rev-parse '@{u}' 2>/dev/null)" ]]; then 
 else warn "HEAD differs from upstream -> git push"; fi
 
 echo
-((fail)) && { echo "PREFLIGHT FAILED"; exit 1; } || echo "PREFLIGHT PASSED — push, then on RIT: rc/update.sh && rc/submit.sh smoke"
+((fail)) && { echo "PREFLIGHT FAILED"; exit 1; } || echo "PREFLIGHT PASSED — push, then on RIT: rc/update.sh && rc/submit.sh smoke && rc/wait.sh"

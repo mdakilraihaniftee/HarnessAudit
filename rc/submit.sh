@@ -45,5 +45,5 @@ echo "$JOBID" > "logs/last_${CLUSTER}.jobid"
 echo "$JOBID" > "logs/last_${NAME}_${CLUSTER}.jobid"
 
 rc_info "submitted ${REPO}-${NAME} as job $JOBID on $CLUSTER (limit $TIME, commit $(git rev-parse --short HEAD))"
-rc_info "status:  rc/status.sh"
+rc_info "wait:    rc/wait.sh      (waits, then shows status)"
 rc_info "follow:  tail -f logs/${REPO}-${NAME}_${JOBID}.out     (Ctrl+C stops watching, not the job)"

@@ -32,8 +32,11 @@ echo "commit  : $(git rev-parse --short HEAD)$DIRTY"
 echo "env     : $VENV"
 echo "python  : $(python --version 2>&1)"
 echo "start   : $(date -Is)"
-nvidia-smi --query-gpu=name,memory.total,driver_version --format=csv,noheader 2>/dev/null \
-  | sed 's/^/gpu     : /' || echo "gpu     : none"
+if [[ -n "${CUDA_VISIBLE_DEVICES:-}" ]] && command -v nvidia-smi >/dev/null; then
+  nvidia-smi --query-gpu=name,memory.total,driver_version --format=csv,noheader 2>&1 | sed 's/^/gpu     : /'
+else
+  echo "gpu     : none (CPU job)"
+fi
 echo "========================================"
 
 if [[ "$MODE" == check ]]; then
