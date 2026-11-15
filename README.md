@@ -185,17 +185,21 @@ python -m multi_agent run multi_agent/tasks/daily_life/wellness/dl-t4.yaml \
 
 
 
+The Qwen judge scripts route only the LLM judge through OpenRouter
+(`OPENROUTER_API_KEY`, optional `OPENROUTER_BASE_URL`, via `MASP_JUDGE_PROVIDER=openrouter`);
+the Codex agents keep their own OpenAI credentials. Both scripts use the `codex` on `PATH`.
+
 Run them with:
 ```bash
-.venv/bin/python scripts/probe_qwen_judge.py
-.venv/bin/python scripts/run_qwen_judge.py
+python scripts/probe_qwen_judge.py
+python scripts/run_qwen_judge.py
 ```
 
 
 You can override models or task:
 
 ```bash
-.venv/bin/python scripts/run_qwen_judge.py \
+python scripts/run_qwen_judge.py \
   multi_agent/tasks/daily_life/wellness/dl-t4.yaml \
   --agent-model gpt-5.6-sol \
   --judge-model qwen/qwen3-8b \

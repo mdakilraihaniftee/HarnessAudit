@@ -116,11 +116,11 @@ fixtures/**/USER.md
 tests/tmp/
 
 
-# Local scripts
-/scripts/
-
-# Local scripts
-/scripts/
+# Local scripts: ignored by default; the experiment entry points below are tracked.
+/scripts/*
+!/scripts/run_codex_benchmark.py
+!/scripts/run_qwen_judge.py
+!/scripts/probe_qwen_judge.py
 
 # Local arXiv paper copy
 2605.14271v1.pdf

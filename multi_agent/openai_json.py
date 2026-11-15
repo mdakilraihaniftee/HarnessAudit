@@ -31,6 +31,35 @@ _TRANSIENT_ERROR_NAMES = {
 }
 
 
+JUDGE_PROVIDER_ENV = "MASP_JUDGE_PROVIDER"
+OPENROUTER_DEFAULT_BASE_URL = "https://openrouter.ai/api/v1"
+
+
+def _client_kwargs() -> dict[str, str]:
+    """Credentials for the JSON judge client.
+
+    Default (``MASP_JUDGE_PROVIDER`` unset or ``openai``): the SDK reads OPENAI_API_KEY /
+    OPENAI_BASE_URL itself. With ``MASP_JUDGE_PROVIDER=openrouter`` only the judge uses
+    OPENROUTER_API_KEY / OPENROUTER_BASE_URL, so OPENAI_* stays untouched for the agents
+    (e.g. Codex in api_key mode).
+    """
+
+    provider = os.getenv(JUDGE_PROVIDER_ENV, "").strip().lower()
+    if provider in {"", "openai"}:
+        return {}
+    if provider == "openrouter":
+        api_key = os.getenv("OPENROUTER_API_KEY", "").strip()
+        if not api_key or api_key == "...":
+            raise OpenAIJSONError(
+                f"{JUDGE_PROVIDER_ENV}=openrouter requires OPENROUTER_API_KEY to be set"
+            )
+        base_url = os.getenv("OPENROUTER_BASE_URL", "").strip() or OPENROUTER_DEFAULT_BASE_URL
+        return {"api_key": api_key, "base_url": base_url}
+    raise OpenAIJSONError(
+        f"Unsupported {JUDGE_PROVIDER_ENV}={provider!r}; expected 'openai' or 'openrouter'"
+    )
+
+
 def _retry_attempts() -> int:
     raw = os.getenv("MASP_OPENAI_RETRY_ATTEMPTS", "3")
     try:
@@ -150,7 +179,11 @@ async def _get_async_openai_client() -> Any:
     global _ASYNC_OPENAI_CLIENT, _ASYNC_OPENAI_CLIENT_CONFIG
 
     openai = import_module("openai")
+    client_kwargs = _client_kwargs()
     config = (
+        os.getenv(JUDGE_PROVIDER_ENV),
+        client_kwargs.get("api_key"),
+        client_kwargs.get("base_url"),
         os.getenv("OPENAI_API_KEY"),
         os.getenv("OPENAI_BASE_URL"),
         os.getenv("OPENAI_ORG_ID"),
@@ -160,7 +193,7 @@ async def _get_async_openai_client() -> Any:
     if _ASYNC_OPENAI_CLIENT is None or _ASYNC_OPENAI_CLIENT_CONFIG != config:
         if _ASYNC_OPENAI_CLIENT is not None:
             await _close_async_client(_ASYNC_OPENAI_CLIENT)
-        _ASYNC_OPENAI_CLIENT = openai.AsyncOpenAI()
+        _ASYNC_OPENAI_CLIENT = openai.AsyncOpenAI(**client_kwargs)
         _ASYNC_OPENAI_CLIENT_CONFIG = config
     return _ASYNC_OPENAI_CLIENT
 
@@ -172,9 +205,10 @@ def create_json_response(
     user_prompt: str,
     max_output_tokens: int = 1024,
 ) -> Any:
+    client_kwargs = _client_kwargs()
     try:
         openai = import_module("openai")
-        client = openai.OpenAI()
+        client = openai.OpenAI(**client_kwargs)
     except Exception as exc:  # noqa: BLE001
         raise OpenAIJSONError(
             "OpenAI SDK is required for non-dry-run generation. "
@@ -237,6 +271,8 @@ async def create_json_response_async(
 ) -> Any:
     try:
         client = await _get_async_openai_client()
+    except OpenAIJSONError:
+        raise
     except Exception as exc:  # noqa: BLE001
         raise OpenAIJSONError(
             "OpenAI SDK is required for LLM-as-judge scoring. "

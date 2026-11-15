@@ -17,6 +17,8 @@ Common variables:
   SKIP_JUDGE=1                             skip LLM judges
   SKIP_EXISTING=1                          skip tasks with an error-free result JSON (resume)
   PYTHON_CMD=python                        interpreter (default: python on PATH)
+  DRY_RUN=1                                print the resolved per-task commands, run nothing
+  MASP_JUDGE_PROVIDER=openrouter           judge via OPENROUTER_API_KEY (agents keep OPENAI_*)
   HARNESSAUDIT_JOB_TMP=/path               per-job scratch (default: ${TMPDIR:-/tmp}/harnessaudit_${SLURM_JOB_ID:-local})
   TASK_FILE=single_agent/tasks/finance/sa-fin-t1.yaml
   TASK_LIST=/path/to/tasks.txt
@@ -45,6 +47,8 @@ TASK_LIST="${TASK_LIST:-}"
 TASK_FILE="${TASK_FILE:-}"
 SKIP_EXISTING="${SKIP_EXISTING:-0}"
 EXTRA_ARGS="${EXTRA_ARGS:-}"
+DRY_RUN="${DRY_RUN:-0}"
+JUDGE_PROVIDER="${MASP_JUDGE_PROVIDER:-openai}"
 PYTHON_CMD_STR="${PYTHON_CMD:-python}"
 read -r -a PYTHON_CMD <<< "$PYTHON_CMD_STR"
 read -r -a EXTRA_ARGV <<< "$EXTRA_ARGS"
@@ -62,19 +66,21 @@ export CLAWTEAM_DATA_DIR="${CLAWTEAM_DATA_DIR:-$JOB_TMP/clawteam}"
 OPENCLAW_PLUGINS_SNAPSHOT="${OPENCLAW_PLUGINS_SNAPSHOT:-$JOB_TMP/openclaw_plugins_enabled.json}"
 # One line per finished task ("done"/"error"/"fail"); rc/status.sh counts these lines.
 PROGRESS_FILE="$OUTPUT_DIR/progress_${HARNESS}_${MODEL_DIR}.txt"
-{
+[[ "$DRY_RUN" == 1 ]] || {
   echo "date=$(date -Is) host=$(hostname) slurm_job=${SLURM_JOB_ID:-none}"
   echo "git_commit=$(git rev-parse HEAD 2>/dev/null || echo unknown)"
   for v in FRAMEWORK HARNESS MODEL TASK_WORKERS JUDGE_MODEL JUDGE_WORKERS SKIP_JUDGE AGENT_TIMEOUT \
            MAX_TURNS OUTPUT_DIR TRACE_DIR TASK_ROOT TASK_LIST TASK_FILE SKIP_EXISTING EXTRA_ARGS \
-           PYTHON_CMD_STR JOB_TMP MASP_WORKSPACES_ROOT CLAWTEAM_DATA_DIR; do
+           PYTHON_CMD_STR JOB_TMP MASP_WORKSPACES_ROOT CLAWTEAM_DATA_DIR JUDGE_PROVIDER; do
     echo "$v=${!v}"
   done
 } > "$LOG_DIR/run_config_$(date +%Y%m%dT%H%M%S)_${SLURM_JOB_ID:-local}.txt"
 
-echo "[run_sa] capturing OpenClaw enabled plugin snapshot"
-openclaw plugins list --enabled --json > "$OPENCLAW_PLUGINS_SNAPSHOT"
-cp "$OPENCLAW_PLUGINS_SNAPSHOT" "$LOG_DIR/openclaw_plugins_enabled.json"
+if [[ "$DRY_RUN" != 1 ]]; then
+  echo "[run_sa] capturing OpenClaw enabled plugin snapshot"
+  openclaw plugins list --enabled --json > "$OPENCLAW_PLUGINS_SNAPSHOT"
+  cp "$OPENCLAW_PLUGINS_SNAPSHOT" "$LOG_DIR/openclaw_plugins_enabled.json"
+fi
 
 TASKS_TMP="$(mktemp)"
 cleanup() {
@@ -95,7 +101,7 @@ else
 fi
 
 TOTAL_TASKS="$(wc -l < "$TASKS_TMP" | tr -d ' ')"
-echo "[run_sa] framework=$FRAMEWORK harness=$HARNESS model=$MODEL tasks=$TOTAL_TASKS task_workers=$TASK_WORKERS judge_model=$JUDGE_MODEL judge_workers=$JUDGE_WORKERS"
+echo "[run_sa] framework=$FRAMEWORK harness=$HARNESS model=$MODEL tasks=$TOTAL_TASKS task_workers=$TASK_WORKERS judge_model=$JUDGE_MODEL judge_workers=$JUDGE_WORKERS judge_provider=$JUDGE_PROVIDER output=$OUTPUT_DIR skip_existing=$SKIP_EXISTING dry_run=$DRY_RUN"
 
 # result_ok FILE... -> exit 0 if any result JSON exists whose "error" field is empty.
 # Runs that hit e.g. API quota/billing errors still write a result JSON; they must not
@@ -145,6 +151,12 @@ run_one() {
     args+=("${EXTRA_ARGV[@]}")
   fi
 
+  if [[ "$DRY_RUN" == 1 ]]; then
+    local resolved
+    printf -v resolved ' %q' "${PYTHON_CMD[@]}" "${args[@]}"
+    echo "[run_sa] dry-run $task_id:$resolved"   # one write per line: workers run in parallel
+    return 0
+  fi
   echo "[run_sa] start $task_id -> $log_file"
   if "${PYTHON_CMD[@]}" "${args[@]}" > "$log_file" 2>&1; then
     local report
