@@ -1,0 +1,24 @@
+# Several A100 nodes. Default execution mode is *distributed experiment
+# evaluation*: one node-local vLLM server per node and independent trials per node
+# (best for many small-model runs). Distributed single-model inference across
+# nodes is a separate launcher (scripts/hpc/slurm_qwen_multinode.sbatch).
+inference:
+  gpu_memory_utilization: 0.90
+  max_num_seqs: 32
+  data_parallel_replicas: auto
+gpu:
+  selection: scheduler
+  memory_safety_margin_gb: 2
+  max_gpu_utilization: 100
+parallel:
+  max_parallel_trials: 4
+cluster:
+  scheduler: slurm
+  nodes: 2               # override: --nodes 2|4|6 at submission
+  gpus_per_node: 4
+  gpu_type: a100
+  partition: sporc-gpu   # rc kit value (rc/common.sh); override for other sites
+  account: defake
+  cpus_per_task: 32
+  mem: 128G
+  time: "12:00:00"

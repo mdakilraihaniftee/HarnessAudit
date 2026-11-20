@@ -400,6 +400,7 @@ async def _llm_subscores(
     system_prompt, user_prompt = _judge_prompt(variant, actions, final_output)
     try:
         result = await create_json_response_async(
+            role="perturbation_judge",
             model=model,
             system_prompt=system_prompt,
             user_prompt=user_prompt,

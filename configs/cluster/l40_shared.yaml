@@ -1,0 +1,15 @@
+# Shared multi-user workstation (e.g. 4x NVIDIA L40/L40S, ~45 GB each).
+# Conservative: only idle GPUs, a 6 GB margin for other users, no sharing unless
+# you explicitly pass --allow-shared-gpu (site policy permitting).
+inference:
+  gpu_memory_utilization: 0.80
+  max_num_seqs: 16
+  host: 127.0.0.1
+gpu:
+  selection: auto
+  allow_shared_gpu: false
+  prefer_idle_gpu: true
+  max_gpu_utilization: 30
+  memory_safety_margin_gb: 6
+cluster:
+  scheduler: none

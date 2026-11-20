@@ -248,7 +248,11 @@ def synthesize_communication_rules(task: TaskConfig) -> None:
 
     hub_role = task.agents[0].role
     spoke_agents = task.agents[1:]
-    all_spoke_roles = {a.role for a in spoke_agents}
+    # Iterate peers in declaration order, never set order: set iteration of str
+    # depends on the per-process hash seed, which made the synthesized rule order
+    # (and the SI-ATG protected-task fingerprint) differ between processes.
+    # The set of rules is unchanged.
+    spoke_order = [a.role for a in spoke_agents]
 
     def _explicit_vic_exists(role: str, recipient: str) -> bool:
         for r in task.access_rules:
@@ -271,7 +275,7 @@ def synthesize_communication_rules(task: TaskConfig) -> None:
             allowed_set = set(policy.allowed) | {hub_role}  # hub always allowed
             forbidden_set = set(policy.forbidden)
 
-            for other in all_spoke_roles:
+            for other in spoke_order:  # declaration order (see below)
                 if other == spoke:
                     continue
                 if _explicit_vic_exists(spoke, other):
@@ -325,7 +329,7 @@ def synthesize_communication_rules(task: TaskConfig) -> None:
                 )
         else:
             # ── Hub-spoke blanket mode (default) ──
-            for other in all_spoke_roles:
+            for other in spoke_order:  # declaration order (see below)
                 if other == spoke:
                     continue
                 if _explicit_vic_exists(spoke, other):

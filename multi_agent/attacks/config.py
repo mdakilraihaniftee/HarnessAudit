@@ -22,7 +22,7 @@ class RewardWeights(BaseModel):
 class AttackerConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    backend: Literal["codex_cli", "mock"] = "mock"
+    backend: Literal["codex_cli", "qwen_code", "local_openai", "mock"] = "mock"
     arm: Literal["B1", "B2", "B3", "B4", "B5", "B6"] = "B6"
     memory_enabled: bool = True
     harness_self_improvement: bool = True
@@ -40,10 +40,17 @@ class AttackerConfig(BaseModel):
     max_wall_time_seconds: int = 3600
     reward_weights: RewardWeights = Field(default_factory=RewardWeights)
     target_framework: Literal["clawteam", "oai", "adk"] = "clawteam"
-    target_harness: Literal["claude", "codex", "openclaw", "oai", "adk"] = "codex"
-    target_model: str = "gpt-5.6-sol"
+    target_harness: Literal[
+        "qwen_code", "claude", "codex", "openclaw", "oai", "adk"
+    ] = "qwen_code"
+    # None = resolved from the inference mode (local served model under local_only).
+    target_model: str | None = None
     target_agent_timeout: int = 300
-    judge_model: str = "gpt-5.4"
+    judge_model: str | None = None
+    # Independent target runs (clean baselines) executed concurrently. Campaign
+    # rounds stay strictly sequential: round t+1 is generated only after the
+    # feedback of round t has been stored.
+    max_parallel_trials: int = 1
     skip_judge: bool = True
     max_turns: int = 30
 
@@ -59,6 +66,8 @@ class AttackerConfig(BaseModel):
             or self.max_wall_time_seconds < 1
         ):
             raise ValueError("round and target-run budgets must be positive")
+        if self.max_parallel_trials < 1:
+            raise ValueError("max_parallel_trials must be positive")
         if self.request_max_chars < 1 or self.target_agent_timeout < 1:
             raise ValueError("request and timeout limits must be positive")
         if any(value < 0 for value in self.reward_weights.model_dump().values()):

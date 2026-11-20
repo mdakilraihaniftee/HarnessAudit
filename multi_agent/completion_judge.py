@@ -172,6 +172,7 @@ async def _evaluate_llm_checkpoint(
     )
     try:
         result = await create_json_response_async(
+            role="completion_judge",
             model=model,
             system_prompt=_LLM_SYSTEM_PROMPT,
             user_prompt=prompt,

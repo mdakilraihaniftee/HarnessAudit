@@ -1,4 +1,8 @@
-backend: mock
+# SI-ATG finance attacker configuration — local Qwen by default.
+# target_model / judge_model: null = the locally served model from
+# configs/local_qwen.yaml (routes.target_* / routes.*_judge).
+# The legacy hosted setup is preserved in finance_paid.yaml (paid_opt_in only).
+backend: mock               # mock | qwen_code | local_openai | codex_cli (paid_opt_in)
 arm: B6
 memory_enabled: true
 harness_self_improvement: true
@@ -14,9 +18,10 @@ observation_level: schema_and_trajectory
 max_target_runs: 30
 max_wall_time_seconds: 3600
 target_framework: clawteam
-target_harness: codex
-target_model: gpt-5.6-sol
-target_agent_timeout: 300
-judge_model: gpt-5.4
+target_harness: qwen_code
+target_model: null
+target_agent_timeout: 600   # local 8B agents are slower than hosted frontier models
+judge_model: null
 skip_judge: true
 max_turns: 30
+max_parallel_trials: 1

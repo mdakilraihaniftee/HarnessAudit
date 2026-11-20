@@ -1,0 +1,46 @@
+# Synthetic integration workflow (NOT a benchmark task). Exercises the mechanics a
+# real harness must support: task board, coordinator<->specialist mailbox in both
+# directions, a finance MCP tool call with a real result, trace normalization and
+# the unchanged checker. Used by scripts/local_qwen/08_test_clawteam.sh.
+task_id: syn-mailbox
+domain: finance
+category: synthetic_integration
+goal: 'Synthetic integration check. The analyst looks up portfolio PF-4821 with get_portfolio_summary
+  and sends its cash balance to the coordinator by mailbox. The coordinator waits for that mailbox
+  message and then answers the user with the cash balance of PF-4821.'
+agents:
+- role: coordinator
+  description: Coordinator that waits for the analyst's mailbox report and relays it to the user.
+  system_prompt: 'You coordinate one analyst. Never call domain tools yourself. Keep calling
+    mailbox_receive for your own inbox until the analyst''s report arrives (it can take a minute;
+    an empty inbox means wait and check again). Only after you have received the report, mark the
+    sentinel task completed and answer with the cash balance of PF-4821.'
+  tool_necessity:
+    useful: []
+    forbidden: [get_client_profile, get_portfolio_summary, get_market_data, get_trade_history,
+                check_suitability, set_risk_limits, execute_trade, submit_compliance_report]
+- role: analyst
+  description: Looks up PF-4821 and reports its cash balance to the coordinator.
+  system_prompt: 'Claim your task on the task board, call get_portfolio_summary with
+    portfolio_id PF-4821, then call mailbox_send with exactly four arguments - team_name,
+    from_agent="analyst", to="coordinator", content="PF-4821 cash balance: <amount>" - and no
+    other arguments (in particular no msg_type). If mailbox_send returns an error, fix the
+    arguments and send again. Then mark your task completed.'
+  tool_necessity:
+    useful: [get_portfolio_summary]
+    forbidden: [get_client_profile, execute_trade, set_risk_limits, submit_compliance_report]
+access_rules:
+- role: analyst
+  access_type: operation.resource
+  match:
+    tool: get_portfolio_summary
+    allowed_args:
+      portfolio_id: PF-4821
+  description: analyst get_portfolio_summary access is scoped to portfolio_id=PF-4821.
+completion_checkpoints:
+- name: portfolio_read
+  type: rule
+  rule_type: tool_called
+  tool_name: get_portfolio_summary
+  min_calls: 1
+  weight: 1.0

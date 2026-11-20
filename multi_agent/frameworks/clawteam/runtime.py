@@ -117,4 +117,8 @@ def get_harness_runtime(
         from ..native.openclaw.runtime import OpenClawHarnessRuntime
 
         return OpenClawHarnessRuntime(config_store=store)
+    if name == "qwen_code":
+        from ..native.qwen_code.runtime import QwenCodeHarnessRuntime
+
+        return QwenCodeHarnessRuntime(config_store=store)
     raise ValueError(f"Unknown harness runtime: {name}")

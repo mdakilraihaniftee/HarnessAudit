@@ -374,7 +374,13 @@ class AttackerAgent:
             prompt = self._generation_prompt(
                 contract, round_index, strategy, experience, parent
             )
+            # Keep the exact generator input so feedback flow between rounds is auditable.
+            prompt_dir = self.output_dir / "prompts"
+            prompt_dir.mkdir(parents=True, exist_ok=True)
+            (prompt_dir / f"round_{round_index:04d}.txt").write_text(prompt, encoding="utf-8")
+            generation_started = time.monotonic()
             generated = self.backend.generate(prompt)
+            generation_seconds = time.monotonic() - generation_started
             _validate_generation(generated)
             request_text = contract.validate_request(generated["request_text"])
             if self.memory.candidate_exists(scenario_id, request_text):
@@ -396,6 +402,16 @@ class AttackerAgent:
                 generation_metadata={
                     "round": round_index,
                     "memory_records_retrieved": len(experience),
+                    "memory_attempt_ids": [
+                        item.get("attempt_id") for item in experience
+                    ],
+                    "parent_candidate_round": (
+                        parent.get("generation_metadata", {}).get("round")
+                        if parent else None
+                    ),
+                    "backend": type(self.backend).__name__,
+                    "generation_seconds": round(generation_seconds, 3),
+                    "prompt_sha256": hashlib.sha256(prompt.encode()).hexdigest(),
                 },
             )
             try:

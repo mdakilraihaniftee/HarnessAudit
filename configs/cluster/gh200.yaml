@@ -1,0 +1,22 @@
+# One GH200 (Grace-Hopper, aarch64) node. GPU memory (96 or 144 GB HBM) and the
+# compute capability are read from NVML at run time. vLLM wheels for aarch64 are
+# installed by scripts/local_qwen/03_setup_qwen.sh into an arch-specific venv
+# (~/venvs/HarnessAudit-vllm-aarch64). Partition/account are the rc kit values
+# for RIT TIGRIS; override for other sites.
+inference:
+  gpu_memory_utilization: 0.90
+  max_num_seqs: 48
+gpu:
+  selection: scheduler
+  memory_safety_margin_gb: 2
+  max_gpu_utilization: 100
+cluster:
+  scheduler: slurm
+  nodes: 1
+  gpus_per_node: 1
+  gpu_type: gh200
+  partition: tigris
+  account: defake
+  cpus_per_task: 16
+  mem: 64G
+  time: "08:00:00"

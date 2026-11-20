@@ -1,0 +1,22 @@
+# One allocated A100 node (40 GB or 80 GB is detected at run time, never assumed).
+# The GPUs belong to the job, so the margin is small and only Slurm-granted GPUs
+# are used. Partition/account below are this repo's rc kit values (rc/common.sh,
+# RIT SPORC); override them for other sites:  --set cluster.partition=...
+inference:
+  gpu_memory_utilization: 0.90
+  max_num_seqs: 32
+gpu:
+  selection: scheduler
+  allow_shared_gpu: false
+  memory_safety_margin_gb: 2
+  max_gpu_utilization: 100
+cluster:
+  scheduler: slurm
+  nodes: 1
+  gpus_per_node: 1
+  gpu_type: a100
+  partition: sporc-gpu
+  account: defake
+  cpus_per_task: 16
+  mem: 64G
+  time: "08:00:00"

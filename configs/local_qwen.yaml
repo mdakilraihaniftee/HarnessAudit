@@ -1,0 +1,99 @@
+# HarnessAudit + SI-ATG local inference configuration (the default for new runs).
+#
+# Precedence (later wins): built-in defaults < this file < cluster profile
+# (HA_CLUSTER_PROFILE / --profile) < HA_* env vars < HA_SET="a.b=1,..." < --set a.b=1
+# Inspect the effective result with:  python -m multi_agent.local_inference config
+#
+# Values here are starting points measured on 4x L40S (46 GB), not universal optima.
+
+inference:
+  mode: local_only                 # local_only (default) | paid_opt_in (explicit, may bill)
+  backend: vllm
+  model: Qwen/Qwen3-8B             # Apache-2.0; native context 32,768
+  model_revision: null             # null = whatever revision is in the local HF cache
+  served_model_name: null          # defaults to `model`
+  endpoint: http://127.0.0.1:8000/v1
+  api_key_env: null                # only for an authenticated self-hosted server
+  approved_endpoints: []           # non-loopback self-hosted endpoints, e.g. ["gpu-node07:8000"]
+  allow_paid_fallback: false       # must stay false in local_only (validated)
+  allow_model_download: false      # server runs with HF_HUB_OFFLINE=1 unless true
+
+  # Qwen Code's own system prompt + tool schemas use ~5-13k tokens before any task
+  # text, so 8k is too small for ClawTeam agents; 32k is Qwen3's native window.
+  context_length: 32768
+  max_output_tokens: 4096
+  # Qwen3 non-thinking recommendation. Applied to qwen_code agents server-side via
+  # vLLM --override-generation-config (Qwen Code --bare sends no sampling params);
+  # judges/local_openai send their own (judges: 0.0).
+  temperature: 0.7
+  top_p: 0.8
+  top_k: 20
+  reasoning_mode: "off"            # Qwen3 thinking off for agents (speed, tool-call parsing)
+  tool_call_parser: hermes         # verified in vLLM 0.33.0 (qwen3_json is an alias)
+  reasoning_parser: qwen3          # verified in vLLM 0.33.0 (`--enable-reasoning` no longer exists)
+
+  tensor_parallel_size: auto       # auto = smallest valid TP that fits (1 for Qwen3-8B)
+  pipeline_parallel_size: 1
+  data_parallel_replicas: 1        # int, or "auto" (= all explicitly listed GPUs / TP)
+  gpu_memory_utilization: 0.80     # upper bound; lowered automatically on shared GPUs
+  max_num_seqs: 16
+  max_num_batched_tokens: 8192
+  dtype: auto
+  quantization: null
+  host: 127.0.0.1                  # never expose the model server beyond loopback by default
+  port: 8000
+  request_timeout_s: 600
+  startup_timeout_s: 900
+
+# Per-role routes. Unset fields inherit from `inference`. Point a role at a
+# different local model/server with model/endpoint (e.g. a larger target model).
+routes:
+  completion_judge: {temperature: 0.0, max_output_tokens: 1024}
+  operational_judge: {temperature: 0.0, max_output_tokens: 1024}
+  perturbation_judge: {temperature: 0.0, max_output_tokens: 2048}
+  attacker_generator: {temperature: 0.7, max_output_tokens: 2048}
+
+# Shorthand (expands into routes): uncomment to split models per group.
+# models:
+#   attacker: Qwen/Qwen3-8B
+#   target: Qwen/Qwen3-14B
+#   judge: Qwen/Qwen3-8B
+
+harness:
+  default: qwen_code
+  preserve_existing_harnesses: true   # claude/codex/openclaw remain, under paid_opt_in only
+  qwen_code:
+    bin: null                         # default: HA_QWEN_BIN, PATH, then the setup prefix
+    exclude_tools: [web_search, web_fetch]
+    max_session_turns: 80
+    attacker_timeout_s: 300
+    attacker_retries: 2
+
+gpu:
+  selection: auto                  # auto | explicit | scheduler
+  explicit_ids: null               # e.g. [0, 2, 3]  (nvidia-smi indices)
+  allow_shared_gpu: false          # GPUs with other users' processes are skipped unless true
+  prefer_idle_gpu: true
+  min_free_memory_gb: 0
+  max_gpu_utilization: 30          # never place on a GPU busier than this (%)
+  memory_safety_margin_gb: 6       # free memory kept untouched for other users' growth
+  lock_dir: null                   # default ~/.cache/harnessaudit/gpu_locks/<host>
+  allow_retry_smaller: true        # on OOM: retry with fewer seqs / eager mode
+
+parallel:
+  max_parallel_trials: 1           # independent target runs (baselines) at once
+  max_agent_workers: 8
+  max_judge_workers: 1
+
+cluster:
+  scheduler: auto
+  nodes: 1
+  nodelist: null
+  partition: null                  # never invented: set from your site (see cluster profiles)
+  gpus_per_node: 1
+
+experiment:
+  domain: finance
+  task: fin-t1
+  default_dry_run: true
+  skip_judge: true

@@ -20,15 +20,15 @@ import signal
 import subprocess
 import sys
 import tempfile
-import time
+import threading
 import uuid
 from pathlib import Path
 from typing import Any
 
 from ..core.base import MASFrameworkAdapter, RunContext, RunOutcome
 from ..core.mcp_lifecycle import restore_bank_from_dump, stop_mcp_server
-from ..core.task_input import build_native_harness_input, stage_task_input_assets
 from ..core.sde_policy import SDE_DOMAIN, sde_mcp_only_enabled
+from ..core.task_input import build_native_harness_input, stage_task_input_assets
 from .process_tree import (
     _kill_pid_family,
     _resolve_current_env_executable,
@@ -51,6 +51,23 @@ TIMEOUT_DRAIN_SECONDS = 30.0
 INTERRUPTED_DRAIN_SECONDS = 8.0
 DRAIN_POLL_SECONDS = 1.0
 STABLE_SNAPSHOT_POLLS = 2
+WAITER_OBSERVER = "__harnessaudit_waiter__"
+HUB_INBOX_PRESERVING_HARNESSES = frozenset({"qwen_code"})
+
+
+def _pid_running(pid: int) -> bool:
+    """True if ``pid`` exists and is not a zombie (exited but unreaped)."""
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    try:
+        stat = Path(f"/proc/{pid}/stat").read_text()
+        return stat.rsplit(")", 1)[1].split()[0] != "Z"
+    except (OSError, IndexError):
+        return True
 
 
 class ClawTeamAdapter(MASFrameworkAdapter):
@@ -198,6 +215,13 @@ class ClawTeamAdapter(MASFrameworkAdapter):
                     )
 
                 sys_prompt = agent_cfg.system_prompt or agent_cfg.description or ""
+                # Harnesses whose CLI cannot take ClawTeam's --append-system-prompt
+                # injection (e.g. qwen_code) receive role instructions directly.
+                register_instructions = getattr(
+                    self._runtime, "register_agent_instructions", None
+                )
+                if callable(register_instructions):
+                    register_instructions(agent_cfg.role, sys_prompt)
 
                 cwd = str(worktrees[agent_cfg.role])
                 spawn_env = self._build_spawn_env(
@@ -269,6 +293,8 @@ class ClawTeamAdapter(MASFrameworkAdapter):
                 hub_role=hub_role,
                 sentinel_task_id=sentinel_id,
                 timeout=self._agent_timeout,
+                agent_pids=[agent.pid for agent in spawned_agents if agent.pid],
+                preserve_hub_inbox=self._preserve_hub_inbox(),
             )
             if wait_result.status in {"timeout", "interrupted"}:
                 self._stop_spawned_agents(
@@ -487,6 +513,18 @@ class ClawTeamAdapter(MASFrameworkAdapter):
 
     # ---- Agent completion detection ----
 
+    def _preserve_hub_inbox(self) -> bool:
+        """Keep the hub's mailbox for the hub agent (see ``_wait_for_team_runtime``).
+
+        Default on for harnesses without published results (``qwen_code``); legacy
+        harnesses keep the historical behaviour for comparability unless
+        ``MASP_PRESERVE_HUB_INBOX=1``. ``MASP_PRESERVE_HUB_INBOX=0`` forces legacy.
+        """
+        flag = os.environ.get("MASP_PRESERVE_HUB_INBOX", "").strip()
+        if flag in {"0", "1"}:
+            return flag == "1"
+        return self._profile.name in HUB_INBOX_PRESERVING_HARNESSES
+
     @staticmethod
     async def _wait_for_team_runtime(
         team_name: str,
@@ -494,8 +532,21 @@ class ClawTeamAdapter(MASFrameworkAdapter):
         hub_role: str,
         sentinel_task_id: str,
         timeout: int = DEFAULT_AGENT_TIMEOUT,
+        agent_pids: list[int] | None = None,
+        preserve_hub_inbox: bool = False,
     ) -> TeamRuntimeWaitResult:
-        """Wait for team runtime convergence using ClawTeam's waiter semantics."""
+        """Wait for team runtime convergence using ClawTeam's waiter semantics.
+
+        If every spawned agent process has exited (non-keepalive harnesses whose
+        agents ended their sessions), no task can make further progress, so the
+        wait ends with status ``agents_exited`` instead of idling until timeout.
+        ``MASP_WAIT_FULL_TIMEOUT=1`` restores the previous behaviour.
+
+        ``TaskWaiter`` drains (consumes) the inbox of the agent it is created for.
+        Created for the hub, it silently deletes specialist reports before the hub
+        agent can ``mailbox_receive`` them. With ``preserve_hub_inbox`` the waiter
+        polls a dedicated observer inbox that no agent writes to instead.
+        """
         from clawteam.store.file import FileTaskStore
         from clawteam.team.mailbox import MailboxManager
         from clawteam.team.models import TaskStatus
@@ -505,7 +556,7 @@ class ClawTeamAdapter(MASFrameworkAdapter):
         mailbox = MailboxManager(team_name)
         waiter = TaskWaiter(
             team_name=team_name,
-            agent_name=hub_role,
+            agent_name=WAITER_OBSERVER if preserve_hub_inbox else hub_role,
             mailbox=mailbox,
             task_store=task_store,
             poll_interval=5.0,
@@ -513,7 +564,34 @@ class ClawTeamAdapter(MASFrameworkAdapter):
         )
 
         loop = asyncio.get_running_loop()
-        wait_result = await loop.run_in_executor(None, waiter.wait)
+        exited = threading.Event()
+        stop_watch = threading.Event()
+
+        def _watch_agent_exit() -> None:
+            stable = 0
+            while not stop_watch.wait(5.0):
+                if agent_pids and not any(_pid_running(pid) for pid in agent_pids):
+                    stable += 1
+                    if stable >= 2:
+                        exited.set()
+                        waiter._running = False   # ends TaskWaiter.wait() cleanly
+                        return
+                else:
+                    stable = 0
+
+        watcher = None
+        if agent_pids and os.environ.get("MASP_WAIT_FULL_TIMEOUT") != "1":
+            watcher = threading.Thread(target=_watch_agent_exit, daemon=True)
+            watcher.start()
+        try:
+            wait_result = await loop.run_in_executor(None, waiter.wait)
+        finally:
+            stop_watch.set()
+        status = wait_result.status
+        if exited.is_set() and status == "interrupted":
+            status = "agents_exited"
+            log.info("All agent processes exited after %.1fs; stopping the wait early",
+                     wait_result.elapsed)
 
         sentinel_completed = False
         try:
@@ -527,7 +605,7 @@ class ClawTeamAdapter(MASFrameworkAdapter):
             log.debug("Failed to inspect sentinel task %s", sentinel_task_id, exc_info=True)
 
         return TeamRuntimeWaitResult(
-            status=wait_result.status,
+            status=status,
             elapsed=wait_result.elapsed,
             total_tasks=wait_result.total,
             completed_tasks=wait_result.completed,

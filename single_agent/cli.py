@@ -62,6 +62,16 @@ def _metric_event_fields(metrics: object | None) -> dict[str, object]:
 
 def cmd_run(args: argparse.Namespace) -> None:
     """Run a single SA task and evaluate."""
+    from multi_agent.local_inference.router import CostGuardError, is_local_only
+
+    if is_local_only():
+        # The single-agent runner only supports OpenClaw, which routes through
+        # OpenRouter. Refuse before any process starts (no hosted fallback).
+        raise CostGuardError(
+            "single_agent uses the OpenClaw harness via OpenRouter, which is billable. "
+            "inference.mode is local_only (the default); set "
+            "HA_INFERENCE_MODE=paid_opt_in to run it deliberately."
+        )
     args.model = _normalize_model(args.model)
     harness = "openclaw_local"
     pkg_root = Path(__file__).resolve().parent        # single_agent/

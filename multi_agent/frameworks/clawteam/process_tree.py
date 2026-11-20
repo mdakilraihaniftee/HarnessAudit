@@ -24,6 +24,11 @@ def _tail_text(path: Path, *, limit: int = 4000) -> str:
 
 
 def _resolve_current_env_executable(name: str) -> str:
+    # Prefer the running interpreter's environment: a stale venv earlier on PATH
+    # (e.g. .venv.pre-uv) must not supply a different clawteam-mcp version.
+    venv_candidate = Path(sys.prefix) / "bin" / name
+    if venv_candidate.is_file():
+        return str(venv_candidate)
     resolved = shutil.which(name)
     if resolved:
         return resolved

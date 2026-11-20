@@ -67,6 +67,9 @@ def _make_components(args: argparse.Namespace) -> tuple[
         config = config.model_copy(update={"target_framework": args.framework})
     if getattr(args, "skip_judge", False):
         config = config.model_copy(update={"skip_judge": True})
+    if getattr(args, "max_parallel_trials", None):
+        config = config.model_copy(update={"max_parallel_trials": args.max_parallel_trials})
+    config = _resolve_local_defaults(config)
     arm_settings = {
         "B1": (False, False),
         "B2": (False, False),
@@ -97,6 +100,7 @@ def _make_components(args: argparse.Namespace) -> tuple[
         int(getattr(args, "max_target_runs", None) or config.max_target_runs),
         config.max_target_runs,
     )
+    _enforce_cost_policy(config, execute_target=not dry_run)
     executor = None
     if not dry_run:
         executor = HarnessAuditExecutor(
@@ -137,6 +141,14 @@ def _make_components(args: argparse.Namespace) -> tuple[
         backend = ControlBackend(config.arm)
     elif config.backend == "codex_cli":
         backend = CodexCliBackend(model=config.model)
+    elif config.backend == "qwen_code":
+        from .qwen_backend import QwenCodeAttackerBackend
+
+        backend = QwenCodeAttackerBackend()
+    elif config.backend == "local_openai":
+        from .qwen_backend import LocalOpenAIAttackerBackend
+
+        backend = LocalOpenAIAttackerBackend()
     else:
         backend = MockBackend()
     harness = AttackerHarness(
@@ -163,12 +175,79 @@ def _make_components(args: argparse.Namespace) -> tuple[
                 "task_path": str(Path(args.task).resolve()),
                 "target_enabled": not dry_run,
                 "target_run_budget": max_runs if not dry_run else 0,
+                "inference_provenance": _provenance(config, args.task),
             },
             sort_keys=True,
         ),
         encoding="utf-8",
     )
     return config, contract, memory, agent, campaign_id
+
+
+def _resolve_local_defaults(config: AttackerConfig) -> AttackerConfig:
+    """Fill target/judge models from the inference mode when left unset."""
+    from multi_agent.local_inference.router import default_judge_model, default_target_model
+
+    update: dict[str, Any] = {}
+    if not config.target_model:
+        update["target_model"] = default_target_model()
+    if not config.judge_model:
+        update["judge_model"] = default_judge_model()
+    return config.model_copy(update=update) if update else config
+
+
+def _enforce_cost_policy(config: AttackerConfig, *, execute_target: bool) -> None:
+    """Refuse billable attacker/target/judge routes before any generation happens."""
+    from multi_agent.local_inference.router import check_attacker_backend
+
+    if config.arm not in {"B1", "B2"}:      # B1/B2 are fixed, model-free controls
+        check_attacker_backend(config.backend)
+    if execute_target:
+        from multi_agent.cli import _enforce_inference_policy
+
+        _enforce_inference_policy(
+            argparse.Namespace(
+                framework=config.target_framework, model=config.target_model,
+                skip_judge=config.skip_judge, judge_model=config.judge_model,
+            ),
+            config.target_harness,
+        )
+
+
+def _provenance(config: AttackerConfig, task: str) -> dict[str, Any]:
+    try:
+        from multi_agent.local_inference.provenance import inference_provenance
+
+        return inference_provenance(
+            harness=config.target_harness, framework=config.target_framework,
+            task_path=task, target_model=config.target_model,
+            judge_model=config.judge_model, skip_judge=config.skip_judge,
+            attacker_backend=(
+                "control" if config.arm in {"B1", "B2"} else config.backend
+            ),
+        )
+    except Exception as exc:  # noqa: BLE001
+        return {"error": f"provenance unavailable: {exc}"}
+
+
+def _run_trials(executor: HarnessAuditExecutor, tasks: list[tuple[Any, str]],
+                max_parallel: int) -> list[TrajectorySummary]:
+    """Run independent target trials, optionally in parallel worker processes.
+
+    Each trial gets a fresh FinanceBank, ClawTeam team, MCP server and isolated
+    workspaces (created per run by HarnessAudit), so trials do not share state.
+    Results are returned in submission order for deterministic downstream use.
+    """
+    if max_parallel <= 1 or len(tasks) <= 1:
+        return [executor(task, text) for task, text in tasks]
+    import multiprocessing
+    from concurrent.futures import ProcessPoolExecutor
+
+    ctx = multiprocessing.get_context("spawn")
+    with ProcessPoolExecutor(max_workers=min(max_parallel, len(tasks)),
+                             mp_context=ctx) as pool:
+        futures = [pool.submit(executor, task, text) for task, text in tasks]
+        return [future.result() for future in futures]
 
 
 def _inspect(contract: TaskContract, level: str) -> dict[str, Any]:
@@ -277,9 +356,18 @@ def _cmd_campaign(args: argparse.Namespace, *, resume: bool = False) -> None:
             baseline_data = json.loads(baseline_path.read_text(encoding="utf-8"))
             agent.baseline_violation_mean = baseline_data.get("mean_unique_violations")
         elif args.execute_target and baseline_runs:
-            baseline_results = []
-            for _ in range(baseline_runs):
-                baseline_results.append(agent.gateway.submit(None, contract.scenario_id))
+            if config.max_parallel_trials > 1 and agent.gateway.executor is not None:
+                for _ in range(baseline_runs):
+                    agent.gateway.budget.consume()
+                baseline_results = _run_trials(
+                    agent.gateway.executor,
+                    [(contract.compose_goal(None), "") for _ in range(baseline_runs)],
+                    config.max_parallel_trials,
+                )
+            else:
+                baseline_results = []
+                for _ in range(baseline_runs):
+                    baseline_results.append(agent.gateway.submit(None, contract.scenario_id))
             baseline_mean = sum(
                 len(item.violations) for item in baseline_results
             ) / len(baseline_results)
@@ -317,11 +405,21 @@ def _cmd_campaign(args: argparse.Namespace, *, resume: bool = False) -> None:
 
 def _cmd_baseline(args: argparse.Namespace) -> None:
     config = load_config(args.config)
+    if args.target_harness:
+        config = config.model_copy(update={"target_harness": args.target_harness})
+    if args.max_parallel_trials:
+        config = config.model_copy(update={"max_parallel_trials": args.max_parallel_trials})
+    if args.target_model:
+        config = config.model_copy(update={"target_model": args.target_model})
+    if args.skip_judge:
+        config = config.model_copy(update={"skip_judge": True})
+    config = _resolve_local_defaults(config)
     contract = load_contract(args.task, config.request_max_chars)
     if contract.scenario_id not in config.allowed_scenarios:
         raise ValueError(f"Scenario {contract.scenario_id!r} is not approved")
     if not args.execute_target:
         raise ValueError("Baseline execution requires explicit --execute-target opt-in")
+    _enforce_cost_policy(config, execute_target=True)
     maximum = min(args.max_target_runs or config.max_target_runs, config.max_target_runs)
     if args.runs < 1 or args.runs > maximum:
         raise ValueError(f"--runs must be between 1 and the target-run budget ({maximum})")
@@ -331,19 +429,24 @@ def _cmd_baseline(args: argparse.Namespace) -> None:
         artifact_dir=output_dir / f"baseline_{uuid.uuid4().hex[:8]}",
         framework=config.target_framework,
         harness=config.target_harness,
-        model=args.target_model or config.target_model,
+        model=config.target_model,
         judge_model=config.judge_model,
         agent_timeout=config.target_agent_timeout,
         max_turns=config.max_turns,
-        skip_judge=args.skip_judge or config.skip_judge,
+        skip_judge=config.skip_judge,
         observation_level=config.observation_level,
     )
     budget = TargetRunBudget(maximum)
-    results = []
     for _ in range(args.runs):
         budget.consume()
-        task = contract.compose_goal(None)
-        results.append(executor(task, ""))
+    import time as _time
+
+    started = _time.monotonic()
+    results = _run_trials(
+        executor, [(contract.compose_goal(None), "") for _ in range(args.runs)],
+        config.max_parallel_trials,
+    )
+    elapsed = _time.monotonic() - started
     violations = [len(result.violations) for result in results]
     raw_violation_counts = [
         item.raw_violation_count for item in results
@@ -353,6 +456,11 @@ def _cmd_baseline(args: argparse.Namespace) -> None:
         "arm": "B0",
         "scenario_id": contract.scenario_id,
         "runs": len(results),
+        "max_parallel_trials": config.max_parallel_trials,
+        "wall_time_s": round(elapsed, 1),
+        "target_harness": config.target_harness,
+        "target_model": config.target_model,
+        "inference_provenance": _provenance(config, args.task),
         "mean_unique_violations": sum(violations) / len(violations),
         "mean_raw_violation_count": (
             sum(raw_violation_counts) / len(results)
@@ -490,6 +598,10 @@ def build_parser() -> argparse.ArgumentParser:
         if task_required:
             command.add_argument("--task", required=True)
         command.add_argument("--config", default=str(DEFAULT_CONFIG))
+        command.add_argument("--local-config",
+                             help="local inference YAML (default configs/local_qwen.yaml)")
+        command.add_argument("--inference-mode", choices=["local_only", "paid_opt_in"],
+                             help="override inference.mode (default local_only)")
         command.add_argument("--memory-db", default=str(DEFAULT_MEMORY))
         command.add_argument("--output-dir", default="multi_agent/attacks/outputs")
 
@@ -508,7 +620,12 @@ def build_parser() -> argparse.ArgumentParser:
     baseline.add_argument("--execute-target", action="store_true")
     baseline.add_argument("--max-target-runs", type=int, default=3)
     baseline.add_argument("--target-model")
+    baseline.add_argument("--target-harness", choices=[
+        "qwen_code", "claude", "codex", "openclaw", "oai", "adk",
+    ])
     baseline.add_argument("--skip-judge", action="store_true")
+    baseline.add_argument("--max-parallel-trials", type=int,
+                          help="independent baseline runs executed concurrently")
 
     for name, help_text in (
         ("campaign", "Run an attacker campaign (dry-run unless opted in)"),
@@ -521,11 +638,17 @@ def build_parser() -> argparse.ArgumentParser:
         command.add_argument(
             "--arm", choices=["B1", "B2", "B3", "B4", "B5", "B6"]
         )
-        command.add_argument("--backend", choices=["mock", "codex_cli"])
+        command.add_argument("--backend",
+                             choices=["mock", "qwen_code", "local_openai", "codex_cli"])
         command.add_argument("--target-model")
         command.add_argument("--target-harness", choices=[
-            "claude", "codex", "openclaw", "oai", "adk",
+            "qwen_code", "claude", "codex", "openclaw", "oai", "adk",
         ])
+        command.add_argument("--harness", dest="target_harness_alias", choices=[
+            "qwen_code", "claude", "codex", "openclaw", "oai", "adk",
+        ], help="alias of --target-harness")
+        command.add_argument("--max-parallel-trials", type=int,
+                             help="concurrent independent baseline runs (rounds stay sequential)")
         command.add_argument("--framework", choices=["clawteam", "oai", "adk"])
         mode = command.add_mutually_exclusive_group()
         mode.add_argument("--execute-target", action="store_true")
@@ -556,8 +679,16 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main() -> None:
+    import os
+
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
     args = build_parser().parse_args()
+    if getattr(args, "inference_mode", None):
+        os.environ["HA_INFERENCE_MODE"] = args.inference_mode
+    if getattr(args, "local_config", None):
+        os.environ["HA_CONFIG"] = args.local_config
+    if getattr(args, "target_harness_alias", None) and not getattr(args, "target_harness", None):
+        args.target_harness = args.target_harness_alias
     if args.command == "inspect":
         _cmd_inspect(args)
     elif args.command == "inspect-trace":

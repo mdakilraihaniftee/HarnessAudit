@@ -9,12 +9,16 @@ Usage: [VAR=...] bash multi_agent/run_ma.sh
 
 Runs all multi_agent/tasks/*.yaml files unless TASK_FILE or TASK_LIST is set.
 
+Inference mode (HA_INFERENCE_MODE): local_only (default) runs local Qwen agents
+(HARNESS=qwen_code, model/judge = locally served model); paid_opt_in restores the
+hosted defaults below and may incur API charges.
+
 Common variables:
-  HARNESS=openclaw|claude|codex|oai|adk   default: openclaw
+  HARNESS=qwen_code|openclaw|claude|codex|oai|adk   default: qwen_code (local_only) / openclaw (paid_opt_in)
   FRAMEWORK=clawteam|oai|adk              default: clawteam, or HARNESS for oai/adk
-  MODEL=gpt-5.4                           model passed to the harness
+  MODEL=...                               default: local served model (local_only) / gpt-5.4 (paid_opt_in)
   TASK_WORKERS=1                           concurrent task runs
-  JUDGE_MODEL=gpt-5.4                      judge model
+  JUDGE_MODEL=...                          default: local judge route (local_only) / gpt-5.4 (paid_opt_in)
   JUDGE_WORKERS=4                          concurrent judge calls per task
   SKIP_JUDGE=1                             skip LLM judges
   SKIP_EXISTING=1                          skip tasks with an error-free result JSON (resume)
@@ -31,8 +35,19 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 cd "$REPO_ROOT"
 
-HARNESS="${HARNESS:-${MASP_HARNESS:-openclaw}}"
-MODEL="${MODEL:-${MASP_MODEL:-gpt-5.4}}"
+PYTHON_CMD_STR="${PYTHON_CMD:-python}"
+read -r -a PYTHON_CMD <<< "$PYTHON_CMD_STR"
+INFERENCE_MODE="${HA_INFERENCE_MODE:-local_only}"
+if [[ "$INFERENCE_MODE" == "paid_opt_in" ]]; then
+  DEFAULT_HARNESS=openclaw; DEFAULT_MODEL=gpt-5.4; DEFAULT_JUDGE=gpt-5.4
+else
+  # Local defaults resolved from configs/local_qwen.yaml (no hosted provider).
+  DEFAULT_HARNESS=qwen_code
+  DEFAULT_MODEL="$("${PYTHON_CMD[@]}" -c 'from multi_agent.local_inference.router import default_target_model as f; print(f())')"
+  DEFAULT_JUDGE="$("${PYTHON_CMD[@]}" -c 'from multi_agent.local_inference.router import default_judge_model as f; print(f())')"
+fi
+HARNESS="${HARNESS:-${MASP_HARNESS:-$DEFAULT_HARNESS}}"
+MODEL="${MODEL:-${MASP_MODEL:-$DEFAULT_MODEL}}"
 if [[ -n "${FRAMEWORK:-}" ]]; then
   FRAMEWORK="$FRAMEWORK"
 elif [[ "$HARNESS" == "oai" || "$HARNESS" == "adk" ]]; then
@@ -43,7 +58,7 @@ fi
 
 TASK_WORKERS="${TASK_WORKERS:-${WORKERS:-1}}"
 JUDGE_WORKERS="${JUDGE_WORKERS:-4}"
-JUDGE_MODEL="${JUDGE_MODEL:-gpt-5.4}"
+JUDGE_MODEL="${JUDGE_MODEL:-$DEFAULT_JUDGE}"
 SKIP_JUDGE="${SKIP_JUDGE:-0}"
 AGENT_TIMEOUT="${AGENT_TIMEOUT:-300}"
 MAX_TURNS="${MAX_TURNS:-30}"
@@ -56,8 +71,6 @@ SKIP_EXISTING="${SKIP_EXISTING:-0}"
 EXTRA_ARGS="${EXTRA_ARGS:-}"
 DRY_RUN="${DRY_RUN:-0}"
 JUDGE_PROVIDER="${MASP_JUDGE_PROVIDER:-openai}"
-PYTHON_CMD_STR="${PYTHON_CMD:-python}"
-read -r -a PYTHON_CMD <<< "$PYTHON_CMD_STR"
 read -r -a EXTRA_ARGV <<< "$EXTRA_ARGS"
 
 MODEL_DIR="${MODEL//\//__}"
@@ -78,7 +91,8 @@ PROGRESS_FILE="$OUTPUT_DIR/progress_${HARNESS}_${MODEL_DIR}.txt"
   echo "git_commit=$(git rev-parse HEAD 2>/dev/null || echo unknown)"
   for v in FRAMEWORK HARNESS MODEL TASK_WORKERS JUDGE_MODEL JUDGE_WORKERS SKIP_JUDGE AGENT_TIMEOUT \
            MAX_TURNS OUTPUT_DIR TRACE_DIR TASK_ROOT TASK_LIST TASK_FILE SKIP_EXISTING EXTRA_ARGS \
-           PYTHON_CMD_STR JOB_TMP MASP_WORKSPACES_ROOT CLAWTEAM_DATA_DIR JUDGE_PROVIDER; do
+           PYTHON_CMD_STR JOB_TMP MASP_WORKSPACES_ROOT CLAWTEAM_DATA_DIR JUDGE_PROVIDER \
+           INFERENCE_MODE; do
     echo "$v=${!v}"
   done
 } > "$LOG_DIR/run_config_$(date +%Y%m%dT%H%M%S)_${SLURM_JOB_ID:-local}.txt"

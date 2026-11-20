@@ -16,6 +16,15 @@ class OpenAIJSONError(RuntimeError):
     """Raised when the OpenAI SDK is unavailable or returns invalid JSON."""
 
 
+class LocalEndpointUnavailable(RuntimeError):
+    """The local model server for a judge route could not be reached.
+
+    Deliberately *not* an ``OpenAIJSONError``: judge callers swallow that type and
+    score 0.0, which would hide a missing local server. This propagates instead,
+    and no hosted provider is tried.
+    """
+
+
 log = logging.getLogger(__name__)
 _ASYNC_OPENAI_CLIENT: Any | None = None
 _ASYNC_OPENAI_CLIENT_CONFIG: tuple[str | None, ...] | None = None
@@ -198,13 +207,164 @@ async def _get_async_openai_client() -> Any:
     return _ASYNC_OPENAI_CLIENT
 
 
+# ----------------------------------------------------------------- local route
+
+
+def _local_route(role: str, model: str) -> Any | None:
+    """Return the local route for ``role`` in local_only mode, else ``None``.
+
+    Raises ``CostGuardError`` when the route is not free to call or when the
+    caller asks for a model the local route does not serve (no substitution).
+    """
+    from multi_agent.local_inference.router import (
+        CostGuardError,
+        is_local_only,
+        require_local_route,
+    )
+
+    if not is_local_only():
+        return None
+    route = require_local_route(role)
+    if model and model != route.model:
+        raise CostGuardError(
+            f"Judge model {model!r} is not served by the local {role} route "
+            f"({route.model!r} at {route.endpoint}). local_only mode never substitutes "
+            "or falls back to a hosted judge; pass --judge-model "
+            f"{route.model} or configure routes.{role}.model."
+        )
+    return route
+
+
+def _strip_to_json(text: str) -> str:
+    content = text.strip()
+    if "</think>" in content:  # reasoning text leaked into content
+        content = content.split("</think>", 1)[1].strip()
+    if content.startswith("```"):
+        content = content.strip("`")
+        if content.lower().startswith("json"):
+            content = content[4:]
+    start, end = content.find("{"), content.rfind("}")
+    if start != -1 and end > start:
+        return content[start:end + 1]
+    return content
+
+
+def _local_request(route: Any, system_prompt: str, user_prompt: str,
+                   max_output_tokens: int) -> dict[str, Any]:
+    return {
+        "model": route.model,
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ],
+        "temperature": route.temperature,
+        "max_tokens": min(max_output_tokens, route.max_output_tokens),
+        "response_format": {"type": "json_object"},
+        "extra_body": {
+            "chat_template_kwargs": {"enable_thinking": route.reasoning_mode == "on"}
+        },
+    }
+
+
+def _parse_local(response: Any, route: Any) -> Any:
+    from multi_agent.local_inference.performance import record_request
+
+    choice = response.choices[0]
+    text = choice.message.content or ""
+    usage = getattr(response, "usage", None)
+    record_request(route.role, route.model, usage, finish_reason=choice.finish_reason)
+    try:
+        return json.loads(_strip_to_json(text))
+    except json.JSONDecodeError as exc:
+        raise OpenAIJSONError(
+            f"Local judge returned non-JSON content (finish={choice.finish_reason}): "
+            f"{text[:500]}"
+        ) from exc
+
+
+def _local_unavailable(route: Any, exc: BaseException) -> LocalEndpointUnavailable:
+    return LocalEndpointUnavailable(
+        f"Local {route.role} endpoint {route.endpoint} is unavailable ({exc}). Start it "
+        "with `python -m multi_agent.local_inference serve` or pass --skip-judge. "
+        "No hosted fallback was attempted."
+    )
+
+
+def _create_local_json_sync(route: Any, system_prompt: str, user_prompt: str,
+                            max_output_tokens: int) -> Any:
+    openai = import_module("openai")
+    client = openai.OpenAI(base_url=route.endpoint, api_key=route.api_key, max_retries=0,
+                           timeout=_local_timeout())
+    try:
+        last: BaseException | None = None
+        for attempt in range(1, _retry_attempts() + 1):
+            try:
+                response = client.chat.completions.create(
+                    **_local_request(route, system_prompt, user_prompt, max_output_tokens)
+                )
+                return _parse_local(response, route)
+            except OpenAIJSONError:
+                raise
+            except Exception as exc:  # noqa: BLE001
+                last = exc
+                if _is_transient_openai_error(exc) and attempt < _retry_attempts():
+                    time.sleep(_retry_delay(_retry_base_delay(), attempt))
+                    continue
+                break
+        assert last is not None
+        if _is_transient_openai_error(last):
+            raise _local_unavailable(route, last) from last
+        raise OpenAIJSONError(f"Local judge request failed: {last}") from last
+    finally:
+        _close_sync_client(client)
+
+
+async def _create_local_json_async(route: Any, system_prompt: str, user_prompt: str,
+                                   max_output_tokens: int) -> Any:
+    openai = import_module("openai")
+    client = openai.AsyncOpenAI(base_url=route.endpoint, api_key=route.api_key,
+                                max_retries=0, timeout=_local_timeout())
+    try:
+        last: BaseException | None = None
+        for attempt in range(1, _retry_attempts() + 1):
+            try:
+                response = await client.chat.completions.create(
+                    **_local_request(route, system_prompt, user_prompt, max_output_tokens)
+                )
+                return _parse_local(response, route)
+            except OpenAIJSONError:
+                raise
+            except Exception as exc:  # noqa: BLE001
+                last = exc
+                if _is_transient_openai_error(exc) and attempt < _retry_attempts():
+                    await asyncio.sleep(_retry_delay(_retry_base_delay(), attempt))
+                    continue
+                break
+        assert last is not None
+        if _is_transient_openai_error(last):
+            raise _local_unavailable(route, last) from last
+        raise OpenAIJSONError(f"Local judge request failed: {last}") from last
+    finally:
+        await _close_async_client(client)
+
+
+def _local_timeout() -> float:
+    from multi_agent.local_inference.config import current_config
+
+    return float(current_config().inference.request_timeout_s)
+
+
 def create_json_response(
     *,
     model: str,
     system_prompt: str,
     user_prompt: str,
     max_output_tokens: int = 1024,
+    role: str = "completion_judge",
 ) -> Any:
+    route = _local_route(role, model)
+    if route is not None:
+        return _create_local_json_sync(route, system_prompt, user_prompt, max_output_tokens)
     client_kwargs = _client_kwargs()
     try:
         openai = import_module("openai")
@@ -268,7 +428,13 @@ async def create_json_response_async(
     system_prompt: str,
     user_prompt: str,
     max_output_tokens: int = 1024,
+    role: str = "completion_judge",
 ) -> Any:
+    route = _local_route(role, model)
+    if route is not None:
+        return await _create_local_json_async(
+            route, system_prompt, user_prompt, max_output_tokens
+        )
     try:
         client = await _get_async_openai_client()
     except OpenAIJSONError:

@@ -24,8 +24,29 @@ Start New Code
 
 ```bash
 source .venv/bin/activate
-python scripts/run_codex_benchmark.py
+python scripts/run_codex_benchmark.py   # hosted Codex: needs HA_INFERENCE_MODE=paid_opt_in
 ```
+
+### Local Qwen (default, no API charges)
+
+All runs default to `inference.mode: local_only`: a local vLLM server with
+`Qwen/Qwen3-8B`, ClawTeam agents and the SI-ATG attacker in the Qwen Code CLI
+(`--harness qwen_code`, `--backend qwen_code`), local judges. Hosted harnesses
+(`claude`, `codex`, `openclaw`, `oai`, `adk`, `codex_cli`) are refused unless
+`HA_INFERENCE_MODE=paid_opt_in` is set deliberately.
+
+```bash
+scripts/local_qwen/03_setup_qwen.sh --allow-download   # vLLM, Qwen Code, weights (once)
+scripts/local_qwen/04_start_server_auto.sh             # GPU auto-placement, 127.0.0.1:8000
+scripts/local_qwen/00_check_costs.sh                   # LOCAL_ONLY_VERIFIED or non-zero exit
+scripts/local_qwen/09_run_clean_finance.sh             # fin-t1 with local agents
+scripts/local_qwen/10_run_attacker_campaign.sh         # SI-ATG, 3 rounds
+```
+
+Docs: `docs/LOCAL_QWEN_SETUP.md`, `docs/LOCAL_INFERENCE_COST_AUDIT.md`,
+`docs/QWEN_HARNESS_INTEGRATION.md`, `docs/GPU_RESOURCE_MANAGEMENT.md`,
+`docs/SLURM_CLUSTER_GUIDE.md`, `docs/LOCAL_PERFORMANCE_REPORT.md`,
+`docs/MIGRATION_SUMMARY.md`.
 
 
 

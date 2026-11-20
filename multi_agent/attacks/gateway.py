@@ -52,7 +52,13 @@ def validate_protected_fields(base: TaskConfig, active: TaskConfig) -> None:
     original = TaskContract.protected_fingerprint_for(base)
     actual = TaskContract.protected_fingerprint_for(active)
     if original != actual:
-        raise ValueError("Task roles, tools, permissions, rules, or checkpoints changed")
+        before = base.model_dump(mode="json", exclude={"goal"})
+        after = active.model_dump(mode="json", exclude={"goal"})
+        changed = sorted(k for k in before if before.get(k) != after.get(k))
+        raise ValueError(
+            "Task roles, tools, permissions, rules, or checkpoints changed "
+            f"(fields: {changed})"
+        )
 
 
 def requester_goal(original_goal: str, request_text: str) -> str:

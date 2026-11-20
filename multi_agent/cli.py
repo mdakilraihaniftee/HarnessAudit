@@ -62,14 +62,63 @@ def _artifact_scoped_dir(base_dir: Path, harness: str, model: str) -> Path:
 
 
 def _effective_harness(args: argparse.Namespace) -> str:
-    """Return the artifact/run harness label implied by the CLI args."""
+    """Return the artifact/run harness label implied by the CLI args.
+
+    Under the default ``local_only`` inference mode ClawTeam runs use the local
+    ``qwen_code`` harness; the legacy ``claude`` default needs ``paid_opt_in``.
+    """
     if args.harness:
         return args.harness
     if args.framework == "oai":
         return "oai"
     if args.framework == "adk":
         return "adk"
-    return "claude"
+    from multi_agent.local_inference.router import default_harness
+
+    return default_harness()
+
+
+def _resolve_model_defaults(args: argparse.Namespace) -> None:
+    """Fill --model / --judge-model from the inference mode when omitted."""
+    from multi_agent.local_inference.router import default_judge_model, default_target_model
+
+    if not getattr(args, "model", None):
+        args.model = default_target_model()
+    if not getattr(args, "judge_model", None):
+        args.judge_model = default_judge_model()
+
+
+def _enforce_inference_policy(args: argparse.Namespace, harness: str) -> None:
+    """Cost guard: refuse configurations that could reach a billable provider.
+
+    Also verifies, before any agent starts, that the local routes this run needs
+    are actually being served (a missing server is an error, never a fallback).
+    """
+    from multi_agent.local_inference.router import check_run_policy, is_local_only
+
+    routes = check_run_policy(
+        framework=args.framework,
+        harness=harness,
+        model=args.model,
+        skip_judge=bool(args.skip_judge),
+        judge_model=args.judge_model,
+    )
+    if not routes or not is_local_only() or os.environ.get("HA_SKIP_ENDPOINT_PREFLIGHT") == "1":
+        return
+    from multi_agent.local_inference.server import endpoint_ready
+
+    checked: set[tuple[str, str]] = set()
+    for route in routes:
+        key = (route.endpoint, route.model)
+        if key in checked:
+            continue
+        checked.add(key)
+        if not endpoint_ready(route.endpoint, route.model):
+            raise RuntimeError(
+                f"Local model route {route.role} ({route.model} at {route.endpoint}) is not "
+                "being served. Start it with `python -m multi_agent.local_inference serve` "
+                "(or scripts/local_qwen/04_start_server_auto.sh). No hosted fallback is used."
+            )
 
 
 def _artifact_prefix(task_id: str, perturbation: PerturbationConfig | None) -> str:
@@ -191,6 +240,13 @@ def build_run_context(
 ) -> RunContextBundle:
     """Load task state and construct the runner for one concrete run."""
 
+    _resolve_model_defaults(args)
+    _enforce_inference_policy(args, harness)
+    if harness == "qwen_code" and not os.environ.get("MASP_NATIVE_ARTIFACT_DIR"):
+        # Keep native Qwen Code transcripts/egress logs next to the normalized trace.
+        os.environ["MASP_NATIVE_ARTIFACT_DIR"] = str(
+            _artifact_scoped_dir(Path(args.trace_dir), harness, args.model) / "native"
+        )
     task, catalog = load_task_with_tools(task_path)
     perturbation = _load_perturbation_config(
         args,
@@ -502,6 +558,8 @@ def build_report_payload(ctx: RunContextBundle, result: RunResultBundle) -> dict
             if isinstance(action.raw_event, dict)
             and action.raw_event.get("sde_native_bypass_detected") is True
         ],
+        "wall_time_s": trace.duration_seconds,
+        "inference_provenance": _inference_provenance(ctx),
     }
     perturbation_payload = _perturbation_trace_payload(
         ctx.perturbation,
@@ -510,6 +568,31 @@ def build_report_payload(ctx: RunContextBundle, result: RunResultBundle) -> dict
     if perturbation_payload is not None:
         report["perturbation"] = perturbation_payload
     return report
+
+
+def _inference_provenance(ctx: RunContextBundle) -> dict[str, Any] | None:
+    try:
+        from multi_agent.local_inference.performance import request_stats
+        from multi_agent.local_inference.provenance import inference_provenance
+
+        record = inference_provenance(
+            harness=ctx.harness,
+            framework=ctx.args.framework,
+            task_path=ctx.task_path,
+            target_model=ctx.args.model,
+            judge_model=ctx.args.judge_model,
+            skip_judge=bool(ctx.args.skip_judge),
+        )
+        record["judge_requests"] = request_stats()
+        native_dir = os.environ.get("MASP_NATIVE_ARTIFACT_DIR")
+        if ctx.harness == "qwen_code" and native_dir:
+            summary = Path(native_dir) / ctx.run_id / "native_summary.json"
+            if summary.is_file():
+                record["native_artifacts"] = str(summary.parent)
+                record["native_summary"] = json.loads(summary.read_text(encoding="utf-8"))
+        return record
+    except Exception as exc:  # noqa: BLE001 - provenance must never break a report
+        return {"error": f"provenance unavailable: {exc}"}
 
 
 def write_artifacts(ctx: RunContextBundle, result: RunResultBundle | None) -> None:
@@ -605,8 +688,11 @@ def main() -> None:
     )
     run_p.add_argument(
         "--model",
-        default="sonnet",
-        help="LLM model label for trace metadata (default: sonnet)",
+        default=None,
+        help=(
+            "Target model. Default: the local served model (local_only), or the legacy "
+            "'sonnet' label under HA_INFERENCE_MODE=paid_opt_in"
+        ),
     )
     run_p.add_argument(
         "--framework",
@@ -617,10 +703,11 @@ def main() -> None:
     run_p.add_argument(
         "--harness",
         default=None,
-        choices=["claude", "codex", "openclaw", "oai", "adk"],
+        choices=["qwen_code", "claude", "codex", "openclaw", "oai", "adk"],
         help=(
-            "Agent harness/artifact label. Defaults to claude for clawteam "
-            "and to the framework name for --framework oai/adk."
+            "Agent harness. Defaults to qwen_code (local) for clawteam under the default "
+            "local_only mode; claude/codex/openclaw/oai/adk call hosted providers and "
+            "require HA_INFERENCE_MODE=paid_opt_in."
         ),
     )
     run_p.add_argument("--agent-timeout", type=int, default=300,
@@ -632,8 +719,11 @@ def main() -> None:
     )
     run_p.add_argument(
         "--judge-model",
-        default="gpt-5.4",
-        help="GPT model for completion and operational judges (default: gpt-5.4)",
+        default=None,
+        help=(
+            "Judge model. Default: the local judge route model (local_only) or gpt-5.4 "
+            "under paid_opt_in. Changing the judge changes the evaluation setting."
+        ),
     )
     run_p.add_argument(
         "--judge-workers",
@@ -649,6 +739,14 @@ def main() -> None:
                        help="Maximum framework turns per run (default: 30)")
     run_p.add_argument("--repeat", type=int, default=1,
                        help="Repeat the same task sequentially (default: 1)")
+    run_p.add_argument(
+        "--inference-mode",
+        choices=["local_only", "paid_opt_in"],
+        default=None,
+        help="Override inference.mode (default from configs/local_qwen.yaml: local_only)",
+    )
+    run_p.add_argument("--local-config", default=None,
+                       help="Local inference YAML (default configs/local_qwen.yaml)")
     run_p.add_argument(
         "--perturbation-id",
         default=None,
@@ -671,6 +769,10 @@ def main() -> None:
     )
 
     args = parser.parse_args()
+    if getattr(args, "inference_mode", None):
+        os.environ["HA_INFERENCE_MODE"] = args.inference_mode
+    if getattr(args, "local_config", None):
+        os.environ["HA_CONFIG"] = args.local_config
 
     if args.command == "run":
         cmd_run(args)

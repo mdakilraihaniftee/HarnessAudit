@@ -121,6 +121,11 @@ tests/tmp/
 !/scripts/run_codex_benchmark.py
 !/scripts/run_qwen_judge.py
 !/scripts/probe_qwen_judge.py
+# local-Qwen runbooks, Slurm launchers, test drivers and scenarios are tracked
+!/scripts/local_qwen/
+!/scripts/hpc/
+!/scripts/tests/
+!/scripts/scenarios/
 
 # Local arXiv paper copy
 2605.14271v1.pdf
@@ -130,3 +135,6 @@ single_agent/SCALING_PLAN.md
 
 hf_data/
 si_atg_experiments/
+
+# qwen_code harness assets are code, not local run scripts
+!multi_agent/frameworks/native/qwen_code/assets/*.sh

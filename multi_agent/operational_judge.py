@@ -180,6 +180,7 @@ async def evaluate_operational_governance(
         try:
             async with semaphore:
                 result = await create_json_response_async(
+                    role="operational_judge",
                     model=model,
                     system_prompt=_SYSTEM_PROMPT,
                     user_prompt=prompt,

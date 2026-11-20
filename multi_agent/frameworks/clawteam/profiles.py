@@ -51,6 +51,13 @@ PROFILES: dict[str, HarnessProfile] = {
         spawn_command=("openclaw", "agent", "--local"),
         mcp_transport="sse",
     ),
+    # Local Qwen via Qwen Code CLI. The runtime replaces the executable with a
+    # per-run wrapper named ``qwen`` (so ClawTeam still adds ``--yolo -p``).
+    "qwen_code": HarnessProfile(
+        name="qwen_code",
+        spawn_command=("qwen",),
+        mcp_transport="streamable-http",
+    ),
 }
 
 
