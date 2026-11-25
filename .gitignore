@@ -138,3 +138,6 @@ si_atg_experiments/
 
 # qwen_code harness assets are code, not local run scripts
 !multi_agent/frameworks/native/qwen_code/assets/*.sh
+
+# Reproducible BACH Phase 1 entry points
+!/scripts/research_phase1/

@@ -221,3 +221,14 @@ optimal objective. Propagation depth is an association estimate because
 normalized traces do not prove causal influence. The prototype uses synthetic
 fixtures only and does not connect to production financial systems. Real
 Codex-authenticated target runs were not launched by default.
+
+
+## BACH Phase 1 measurement foundation
+
+The fixed-control pilot is implemented separately under
+`multi_agent/research_phase1/`; it reuses this prototype's `TaskContract` and
+protected-field validation, and the existing target runner and checker. It does
+not change SI-ATG rewards, strategy learning, memory, harness optimization or
+previous results. See [the Phase 1 report](research/PHASE_1_REPORT.md) and
+[manual runbook](../scripts/research_phase1/README.md). Adaptive excess-risk
+objectives and independent candidate confirmation remain future Prompt 2 work.

@@ -27,6 +27,17 @@ source .venv/bin/activate
 python scripts/run_codex_benchmark.py   # hosted Codex: needs HA_INFERENCE_MODE=paid_opt_in
 ```
 
+### BACH Phase 1 research pilot
+
+Fixed clean, benign-placebo and adversarial controls now have a separate,
+local-only, explicitly budgeted runner. See
+[scripts/research_phase1/README.md](scripts/research_phase1/README.md) for GPU
+selection and the nine-run manual pilot, and
+[docs/research/PHASE_1_REPORT.md](docs/research/PHASE_1_REPORT.md) for the code,
+security-rule and verification audit. Original SI-ATG and benchmark scores are
+preserved; the additional taxonomy separates forbidden actions from unnecessary
+tools. Real runs require `GPU_IDS` and `RUN_REAL=YES`. The [15-target launcher](scripts/research_phase1/README.md#one-command-15-real-trial-launcher-08) automates four-replica serving, isolated concurrent targets, resume and a single reviewer archive.
+
 ### Local Qwen (default, no API charges)
 
 All runs default to `inference.mode: local_only`: a local vLLM server with
@@ -504,3 +515,5 @@ If you use HarnessAudit in research, please cite:
 
 ##  💬 Acknowledgments
 We thank the contributors of the open-source project [ClawTeam](https://github.com/HKUDS/ClawTeam).
+
+For the repaired-target audit, controls and benign diagnostics, see [Phase 1R](scripts/research_phase1/PHASE1R.md). GPU runs are manual; CPU evidence is under `results/research_phase1r/`.
